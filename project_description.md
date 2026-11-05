@@ -2,15 +2,15 @@
 
 ## Project Idea and Abstract
 
-The objective of this project is to build a robust static program analysis system capable of generating comprehensive call-graphs for Python programs. While traditional static analysis tools can map standard first-order function calls, they frequently struggle with dynamically typed languages and functional programming paradigms. This project will focus on supporting and analyzing calls to higher-order functions (HOFs), return functions, and utilize closures and decorators.
+The objective of this project is to build a robust static program analysis system capable of generating comprehensive call-graphs for Python programs. While traditional static analysis tools can map standard first-order function calls, they frequently struggle with dynamically typed languages and functional programming paradigms. This project will focus on supporting and analyzing calls to higher-order functions (HOFs), and polymorphism.
 
 By taking Python source code as input, the system will output a structured call-graph (e.g., in DOT or JSON format) that tracks function references through variables, parameters, and return values, providing a deeper and more accurate representation of program execution flow. Based on this call graph, we can analyze it further and infer warnings for use vulnerable libraries and functions.
 
 ## Motivation
 
-Python’s dynamic behavior and use of higher-order functions, such as decorators, map, filter, and custom callbacks, make static code analysis challenging. When standard analysis tools encounter a function passed as a variable, they often drop the trace, resulting in an incomplete or disconnected call-graph. 
+Python’s dynamic behavior and use of higher-order functions, such as decorators, map, filter, custom callbacks, and polymorphism make static code analysis challenging. When standard analysis tools encounter a function passed as a variable, they often drop the trace, resulting in an incomplete or disconnected call-graph. 
 
-This missing information ca create blind spots for developers attempting to refactor large codebases, security researchers scanning vulnerabilities via taint analysis, and automated tools performing dead-code elimination for example. By accurately mapping HOFs, this project bridges the gap between dynamic language flexibility and static analysis reliability, directly improving code comprehensibility, maintainability, and security auditing. 
+This missing information can create blind spots for developers attempting to refactor large codebases, security researchers scanning vulnerabilities via taint analysis, and automated tools performing dead-code elimination for example. By accurately mapping HOFs, this project bridges the gap between dynamic language flexibility and static analysis reliability, directly improving code comprehensibility, maintainability, and security auditing. 
 
 ## Technical Approach and Handling Language Features
 
@@ -64,7 +64,6 @@ Given the complexity of static analysis, a robust testing strategy is required t
 
 ## Extension possibilites
 
-- **polymorphism**
 - **implicit calls**
     - magic methods (operators/built-ins)
     - attribute access interception
