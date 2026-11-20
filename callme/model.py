@@ -1,0 +1,139 @@
+"""Core data types shared by every stage of the analysis.
+
+Vocabulary:
+  FuncId   identity of one function (def, lambda or the module body)
+  Closure  a *token*: the abstract value "this function, created in that context"
+  Ctx      a *context*: the abstract entry state of a
+           function (param -> set of closures) plus the captured defining node
+  Node     (function, context): one analysed instance of a function
+  Edge     call edge between two nodes at a syntactic call site
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import PurePath
+from typing import FrozenSet, Optional, Tuple
+
+
+@dataclass(frozen=True)
+class FuncId:
+    """Identity of one function, stored as separate parts; strings are built on demand.
+
+    file      source path as given (e.g. "pkg/util.py")
+    qualname  dotted scope path of the function (e.g. "Outer.make.inner")
+    lineno    1-based line of the definition
+    col       0-based column of the definition
+    """
+
+    qualname: str
+    file: str
+    lineno: int
+    col: int
+
+    @property
+    def name(self) -> str:
+        """Last component of the qualname ("inner")."""
+        return self.qualname.rsplit(".", 1)[-1]
+
+    @property
+    def scope(self) -> str:
+        """Enclosing scope part of the qualname ("Outer.make"), "" at top level."""
+        return self.qualname.rpartition(".")[0]
+
+    @property
+    def module(self) -> str:
+        """Dotted module name derived from the file path ("pkg.util")."""
+        parts = PurePath(self.file).with_suffix("").parts
+        parts = tuple(p for p in parts if p not in ("/", ".", ".."))
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]
+        return ".".join(parts) or self.file
+
+    @property
+    def uid(self) -> str:
+        """Unique id: file:line:col:qualname (stable even when names repeat)."""
+        return self.render("full")
+
+    def render(self, style: str = "full") -> str:
+        """Build the string form: "full" = file:line:col:qualname, "module" =
+        module.qualname, "short" = qualname."""
+        if style == "full":
+            return f"{self.file}:{self.lineno}:{self.col}:{self.qualname}"
+        if style == "module":
+            return f"{self.module}.{self.qualname}"
+        if style == "short":
+            return self.qualname
+        raise ValueError(f"unknown id style: {style}")
+
+    def __str__(self) -> str:
+        return self.uid
+
+
+@dataclass(frozen=True)
+class Closure:
+    """Token: function `func` created while `parent` was running.
+
+    `parent` is None when the defining context is unknown or was widened to keep
+    the analysis finite; free variables are then read from every context.
+    """
+
+    func: FuncId
+    parent: Optional["Node"] = None
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash((self.func, self.parent)))
+
+    def __hash__(self) -> int:
+        return self._h
+
+
+ParamState = Tuple[Tuple[str, FrozenSet[Closure]], ...]
+
+
+@dataclass(frozen=True)
+class Ctx:
+    """Abstract entry state. Only parameters holding functions are recorded."""
+
+    params: ParamState = ()
+    parent: Optional["Node"] = None
+    merged: bool = False  # widened context: entry state lives in State.entry
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash((self.params, self.parent, self.merged)))
+
+    def __hash__(self) -> int:
+        return self._h
+
+
+@dataclass(frozen=True)
+class Node:
+    func: FuncId
+    ctx: Ctx
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash((self.func, self.ctx)))
+
+    def __hash__(self) -> int:
+        return self._h
+
+
+@dataclass(frozen=True)
+class Site:
+    """A syntactic call site (or decorator application)."""
+
+    caller: FuncId
+    line: int
+    col: int
+    text: str
+    kind: str = "call"  # "call" | "decorator"
+
+
+@dataclass(frozen=True)
+class Edge:
+    caller: Node
+    site: Site
+    callee: Node
