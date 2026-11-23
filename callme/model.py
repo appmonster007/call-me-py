@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import PurePath
-from typing import FrozenSet, Optional, Tuple
+from typing import override
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,7 @@ class FuncId:
             return self.qualname
         raise ValueError(f"unknown id style: {style}")
 
+    @override
     def __str__(self) -> str:
         return self.uid
 
@@ -78,18 +79,19 @@ class Closure:
     """
 
     func: FuncId
-    parent: Optional["Node"] = None
+    parent: Node | None = None
     depth: int = field(default=0, compare=False)
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_h", hash((self.func, self.parent)))
 
+    @override
     def __hash__(self) -> int:
         return self._h
 
 
-ParamState = Tuple[Tuple[str, FrozenSet[Closure]], ...]
+ParamState = tuple[tuple[str, frozenset[Closure]], ...]
 
 
 @dataclass(frozen=True)
@@ -97,13 +99,14 @@ class Ctx:
     """Abstract entry state. Only parameters holding functions are recorded."""
 
     params: ParamState = ()
-    parent: Optional["Node"] = None
+    parent: Node | None = None
     merged: bool = False  # widened context: entry state lives in State.entry
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_h", hash((self.params, self.parent, self.merged)))
 
+    @override
     def __hash__(self) -> int:
         return self._h
 
@@ -117,6 +120,7 @@ class Node:
     def __post_init__(self) -> None:
         object.__setattr__(self, "_h", hash((self.func, self.ctx)))
 
+    @override
     def __hash__(self) -> int:
         return self._h
 

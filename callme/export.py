@@ -3,23 +3,22 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from typing import Dict, List
 
 from .callgraph import CallGraph
-from .model import Node
+from .model import Node, Site
 
 
-def _site(s) -> dict:
+def _site(s: Site) -> dict[str, int | str]:
     return {"line": s.line, "col": s.col, "text": s.text, "kind": s.kind}
 
 
-def _ctx(cg: CallGraph, node: Node) -> dict:
+def _ctx(cg: CallGraph, node: Node) -> dict[str, list[str]]:
     if node.ctx.merged:
         return {"*": []}
     return {n: sorted({cg.name(t.func) for t in toks}) for n, toks in node.ctx.params}
 
 
-def to_dict(cg: CallGraph) -> dict:
+def to_dict(cg: CallGraph) -> dict[str, object]:
     prog = cg.prog
     reach = cg.reachable()
     return {
@@ -61,7 +60,7 @@ def _q(s: str) -> str:
 def to_dot(cg: CallGraph, contexts: bool = False, returns: bool = False) -> str:
     """Function-level graph by default; `contexts` shows one box per (function, context);
     `returns` adds dotted return edges (callee -> caller)."""
-    lines: List[str] = ["digraph callgraph {", "  rankdir=LR;",
+    lines: list[str] = ["digraph callgraph {", "  rankdir=LR;",
                         '  node [shape=box, fontname="Helvetica"];']
     if contexts:
         for n in cg.nodes:
@@ -71,13 +70,13 @@ def to_dot(cg: CallGraph, contexts: bool = False, returns: bool = False) -> str:
             lines.append(f"  {_q(cg.labels[e.caller])} -> {_q(cg.labels[e.callee])} [label={_q(lbl)}];")
             if returns:
                 lines.append(f"  {_q(cg.labels[e.callee])} -> {_q(cg.labels[e.caller])} "
-                             "[style=dotted, constraint=false];")
+                             + "[style=dotted, constraint=false];")
     else:
         reach = cg.reachable()
         for info in cg.prog.funcs.values():
             style = "" if info.id in reach else " [style=dashed, color=gray, fontcolor=gray]"
             lines.append(f"  {_q(cg.name(info.id))}{style};")
-        sites: Dict[tuple, set] = defaultdict(set)
+        sites: defaultdict[tuple[str, str], set[int]] = defaultdict(set)
         for e in cg.edges:
             sites[(cg.name(e.caller.func), cg.name(e.callee.func))].add(e.site.line)
         for (c, d), ls in sorted(sites.items()):

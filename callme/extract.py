@@ -6,9 +6,10 @@ Builds a `Program`: every function (def, async def, lambda, module body) gets a
 from __future__ import annotations
 
 import ast
+import os
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
 
 from .model import FuncId, Site
 
@@ -16,15 +17,17 @@ FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 SCOPE_NODES = FUNC_NODES + (ast.Lambda, ast.ClassDef)
 MODULE_NAME = "<module>"
 
+ScopeNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+
 
 @dataclass(frozen=True)
 class Sig:
-    pos: Tuple[str, ...]
-    kwonly: Tuple[str, ...]
-    vararg: Optional[str]
-    kwarg: Optional[str]
-    defaults: Tuple[Tuple[str, ast.expr], ...]
-    required: Tuple[str, ...]
+    pos: tuple[str, ...]
+    kwonly: tuple[str, ...]
+    vararg: str | None
+    kwarg: str | None
+    defaults: tuple[tuple[str, ast.expr], ...]
+    required: tuple[str, ...]
 
 
 @dataclass(eq=False)
@@ -32,10 +35,10 @@ class FuncInfo:
     id: FuncId
     kind: str  # "module" | "def" | "lambda"
     node: ast.AST
-    parent: Optional[FuncId]  # lexical parent function (classes are skipped)
+    parent: FuncId | None  # lexical parent function (classes are skipped)
     sig: Sig
-    locals: frozenset
-    body: Tuple[ast.AST, ...]
+    locals: frozenset[str]
+    body: tuple[ast.AST, ...]
 
 
 @dataclass(eq=False)
@@ -43,27 +46,27 @@ class Program:
     file: str
     tree: ast.Module
     module: FuncId
-    funcs: Dict[FuncId, FuncInfo]
-    by_node: Dict[int, FuncId]
+    funcs: dict[FuncId, FuncInfo]
+    by_node: dict[int, FuncId]
 
-    def nesting_edges(self) -> List[Tuple[FuncId, FuncId]]:
+    def nesting_edges(self) -> list[tuple[FuncId, FuncId]]:
         """The function-identifier graph: (lexical parent, child)."""
         return [(i.parent, i.id) for i in self.funcs.values() if i.parent is not None]
 
 
 # ---------------------------------------------------------------- scopes
-def outer_parts(n: ast.AST) -> List[ast.AST]:
+def outer_parts(n: ScopeNode) -> list[ast.expr]:
     """Parts of a scope node that are evaluated in the *enclosing* scope."""
     if isinstance(n, ast.ClassDef):
         return [*n.decorator_list, *n.bases, *[k.value for k in n.keywords]]
     a = n.args  # FunctionDef / AsyncFunctionDef / Lambda
-    deco = list(getattr(n, "decorator_list", []))
+    deco = n.decorator_list if not isinstance(n, ast.Lambda) else []
     return [*deco, *a.defaults, *[d for d in a.kw_defaults if d is not None]]
 
 
-def walk_scope(nodes) -> Iterator[ast.AST]:
+def walk_scope(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
     """All nodes of one scope; nested scopes are yielded but not entered."""
-    stack = list(reversed(list(nodes)))
+    stack: list[ast.AST] = list(reversed(list(nodes)))
     while stack:
         n = stack.pop()
         yield n
@@ -75,7 +78,7 @@ def walk_scope(nodes) -> Iterator[ast.AST]:
 
 def make_sig(args: ast.arguments) -> Sig:
     pos = [a.arg for a in args.posonlyargs + args.args]
-    defaults: Dict[str, ast.expr] = {}
+    defaults: dict[str, ast.expr] = {}
     for name, d in zip(pos[len(pos) - len(args.defaults):], args.defaults):
         defaults[name] = d
     kwonly = [a.arg for a in args.kwonlyargs]
@@ -91,9 +94,9 @@ def make_sig(args: ast.arguments) -> Sig:
     )
 
 
-def scope_locals(body, params) -> frozenset:
+def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[str]:
     names = set(params)
-    declared = set()
+    declared: set[str] = set()
     for n in walk_scope(body):
         if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
             names.add(n.id)
@@ -113,12 +116,13 @@ def scope_locals(body, params) -> frozenset:
 # ---------------------------------------------------------------- program
 def build_program(source: str, filename: str = "<string>") -> Program:
     tree = ast.parse(source, filename=filename)
-    funcs: Dict[FuncId, FuncInfo] = {}
-    by_node: Dict[int, FuncId] = {}
+    funcs: dict[FuncId, FuncInfo] = {}
+    by_node: dict[int, FuncId] = {}
 
-    def add(node, qualname, parent, kind, body, args) -> FuncId:
-        fid = FuncId(qualname, filename, getattr(node, "lineno", 1), getattr(node, "col_offset", 0))
-        sig = make_sig(args) if args is not None else Sig((), (), None, None, (), ())
+    def add(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, qualname: str, parent: FuncId,
+            kind: str, body: Sequence[ast.AST], args: ast.arguments) -> FuncId:
+        fid = FuncId(qualname, filename, node.lineno, node.col_offset)
+        sig = make_sig(args)
         params = [*sig.pos, *sig.kwonly, *([sig.vararg] if sig.vararg else []),
                   *([sig.kwarg] if sig.kwarg else [])]
         funcs[fid] = FuncInfo(fid, kind, node, parent, sig, scope_locals(body, params), tuple(body))
@@ -160,13 +164,13 @@ def build_program(source: str, filename: str = "<string>") -> Program:
     return Program(filename, tree, mod, funcs, by_node)
 
 
-def parse_file(path) -> Program:
+def parse_file(path: str | os.PathLike[str]) -> Program:
     p = Path(path)
     return build_program(p.read_text(encoding="utf-8"), str(p))
 
 
 # ---------------------------------------------------------------- call sites
-def make_site(caller: FuncId, node: ast.AST, kind: str = "call") -> Site:
+def make_site(caller: FuncId, node: ast.expr, kind: str = "call") -> Site:
     text = ast.unparse(node)
     if kind == "decorator":
         text = "@" + text
@@ -175,9 +179,9 @@ def make_site(caller: FuncId, node: ast.AST, kind: str = "call") -> Site:
     return Site(caller, node.lineno, node.col_offset, text, kind)
 
 
-def call_sites(prog: Program, fid: FuncId) -> Tuple[Site, ...]:
+def call_sites(prog: Program, fid: FuncId) -> tuple[Site, ...]:
     """Syntactic call sites (and decorator applications) executed by `fid`."""
-    out = set()
+    out: set[Site] = set()
     for n in walk_scope(prog.funcs[fid].body):
         if isinstance(n, ast.Call):
             out.add(make_site(fid, n, "call"))

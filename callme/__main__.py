@@ -1,12 +1,13 @@
 """python -m callme FILE -o OUT [--format json|dot] [--contexts] [--returns]"""
 import argparse
 import sys
+from collections.abc import Sequence
 
-from . import analyze_file, to_dot, to_json
+from . import CallGraph, analyze_file, to_dot, to_json
 from .extract import call_sites
 
 
-def print_graph(cg) -> None:
+def print_graph(cg: CallGraph) -> None:
     """Step-1 graph: function nesting edges and caller -> call-site edges (to stderr)."""
     prog, name = cg.prog, cg.name
     err = sys.stderr
@@ -19,7 +20,7 @@ def print_graph(cg) -> None:
             print(f"{name(fid)} -> {s.text} @{s.line}:{s.col} [{s.kind}]", file=err)
 
 
-def main(argv=None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="callme", description=__doc__)
     ap.add_argument("file")
     ap.add_argument("--format", choices=["json", "dot"], default="json")
