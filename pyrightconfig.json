@@ -1,5 +1,5 @@
 {
-  "ignore": ["examples", "test.py"],
+  "ignore": ["examples"],
   "reportMissingTypeStubs": "none",
   "reportUnknownMemberType": "none",
   "reportUnusedCallResult": "none",
