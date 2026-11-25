@@ -806,3 +806,117 @@ d.unknown
     }
     attr_sites = [s for s in cg.sites if s.kind == "attr"]
     assert any(s.text == "d.unknown" and "Dyn.__getattr__" in cg.targets(s) for s in attr_sites)
+
+
+def test_dunder_operators_reflected_and_augassign() -> None:
+    src = """
+def ping():
+    return 1
+
+class Num:
+    def __add__(self, other):
+        return Num()
+
+    def __rsub__(self, other):
+        return Num()
+
+    def __iadd__(self, other):
+        return self
+
+    def __neg__(self):
+        return self
+
+    def __bool__(self):
+        return True
+
+    def touch(self):
+        return ping()
+
+a = Num()
+b = Num()
+(a + b).touch()
+(1 - a).touch()
+(-a).touch()
+not a
+a += b
+"""
+    assert edges(src) == {
+        ("<module>", "Num.__add__"),
+        ("<module>", "Num.__rsub__"),
+        ("<module>", "Num.__neg__"),
+        ("<module>", "Num.__bool__"),
+        ("<module>", "Num.__iadd__"),
+        ("<module>", "Num.touch"),
+        ("Num.touch", "ping"),
+    }
+
+
+def test_dunder_subscript_context_manager_and_iteration() -> None:
+    src = """
+def leaf():
+    return 1
+
+class Resource:
+    def use(self):
+        return leaf()
+
+class Ctx:
+    def __enter__(self):
+        return Resource()
+
+    def __exit__(self, *exc):
+        return False
+
+class MyIter:
+    def __next__(self):
+        return Resource()
+
+class Seq:
+    def __getitem__(self, idx):
+        return Resource()
+
+    def __setitem__(self, idx, v):
+        leaf()
+
+    def __delitem__(self, idx):
+        leaf()
+
+    def __iter__(self):
+        return MyIter()
+
+    def __len__(self):
+        return 1
+
+    def __repr__(self):
+        return "Seq"
+
+with Ctx() as r:
+    r.use()
+
+s = Seq()
+s[0].use()
+s[0] = 1
+del s[0]
+for item in s:
+    item.use()
+it = iter(s)
+next(it).use()
+bool(s)      # falls back to __len__
+str(s)       # falls back to __repr__
+f"{s!r}"
+"""
+    assert edges(src) == {
+        ("<module>", "Ctx.__enter__"),
+        ("<module>", "Ctx.__exit__"),
+        ("<module>", "Resource.use"),
+        ("<module>", "Seq.__getitem__"),
+        ("<module>", "Seq.__setitem__"),
+        ("<module>", "Seq.__delitem__"),
+        ("<module>", "Seq.__iter__"),
+        ("<module>", "MyIter.__next__"),
+        ("<module>", "Seq.__len__"),
+        ("<module>", "Seq.__repr__"),
+        ("Resource.use", "leaf"),
+        ("Seq.__setitem__", "leaf"),
+        ("Seq.__delitem__", "leaf"),
+    }

@@ -44,6 +44,39 @@ Calls = list[tuple[Site, Node]]
 __all__ = ["EMPTY", "Vals", "Env", "State", "Interp", "analyze"]
 MAX_DEPTH = 3  # nesting of captured contexts before widening to "unknown parent"
 
+BINOP_DUNDERS: dict[type[ast.operator], tuple[str, str, str]] = {
+    ast.Add: ("__add__", "__radd__", "__iadd__"),
+    ast.Sub: ("__sub__", "__rsub__", "__isub__"),
+    ast.Mult: ("__mul__", "__rmul__", "__imul__"),
+    ast.MatMult: ("__matmul__", "__rmatmul__", "__imatmul__"),
+    ast.Div: ("__truediv__", "__rtruediv__", "__itruediv__"),
+    ast.FloorDiv: ("__floordiv__", "__rfloordiv__", "__ifloordiv__"),
+    ast.Mod: ("__mod__", "__rmod__", "__imod__"),
+    ast.Pow: ("__pow__", "__rpow__", "__ipow__"),
+    ast.LShift: ("__lshift__", "__rlshift__", "__ilshift__"),
+    ast.RShift: ("__rshift__", "__rrshift__", "__irshift__"),
+    ast.BitOr: ("__or__", "__ror__", "__ior__"),
+    ast.BitXor: ("__xor__", "__rxor__", "__ixor__"),
+    ast.BitAnd: ("__and__", "__rand__", "__iand__"),
+}
+UNARYOP_DUNDERS: dict[type[ast.unaryop], str] = {
+    ast.UAdd: "__pos__",
+    ast.USub: "__neg__",
+    ast.Invert: "__invert__",
+}
+CMP_DUNDERS: dict[type[ast.cmpop], tuple[str, str]] = {
+    ast.Eq: ("__eq__", "__eq__"),
+    ast.NotEq: ("__ne__", "__ne__"),
+    ast.Lt: ("__lt__", "__gt__"),
+    ast.LtE: ("__le__", "__ge__"),
+    ast.Gt: ("__gt__", "__lt__"),
+    ast.GtE: ("__ge__", "__le__"),
+}
+_LITERAL_CONTAINERS = (
+    ast.List, ast.Tuple, ast.Set, ast.Dict,
+    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+)
+
 
 class State:
     """Global fixpoint state: contexts, local envs, return values, call edges."""
@@ -311,11 +344,12 @@ class Interp:
         elif isinstance(t, ast.Attribute):
             self.set_attr(self.eval(t.value), t.attr, vals, make_site(self.info.id, t, "attr"))
         elif isinstance(t, ast.Subscript):
-            self.eval(t.slice)
-            if isinstance(t.value, (ast.Name, ast.Attribute, ast.Subscript)):
+            slc = self.eval(t.slice)
+            obj = self.eval(t.value)
+            found, _ = self.invoke_dunder(obj, "__setitem__", [slc, vals],
+                                          make_site(self.info.id, t, "op"))
+            if not found and isinstance(t.value, (ast.Name, ast.Attribute, ast.Subscript)):
                 self.assign(t.value, vals)
-            else:
-                self.eval(t.value)
         elif isinstance(t, (ast.Tuple, ast.List)):
             for x in t.elts:
                 self.assign(x, vals)
@@ -323,6 +357,43 @@ class Interp:
             self.assign(t.value, vals)
         else:
             self.eval(t)
+
+    def invoke_dunder(self, recv: Vals, name: str, pos: Sequence[Vals],
+                      site: Site) -> tuple[bool, Vals]:
+        """Invoke special method `name` on any `Instance` in `recv` whose MRO defines it."""
+        found = False
+        out = EMPTY
+        for t in recv:
+            if isinstance(t, Instance):
+                fn = self.state.lookup_class_attr(t.cls, name)
+                if fn:
+                    found = True
+                    bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
+                    out |= self.apply(bound, pos, None, {}, None, site)
+        return found, out
+
+    def iterate(self, iterable: Vals, site: Site, *, is_async: bool = False) -> Vals:
+        """Drive `__iter__`/`__next__` (or async variants) on instances; pass through others."""
+        iter_name = "__aiter__" if is_async else "__iter__"
+        next_name = "__anext__" if is_async else "__next__"
+        out = EMPTY
+        for t in iterable:
+            if isinstance(t, Instance):
+                it_fn = self.state.lookup_class_attr(t.cls, iter_name)
+                if it_fn:
+                    bound = frozenset(_bind_attr(f, t.cls, t) for f in it_fn)
+                    iters = self.apply(bound, [], None, {}, None, site)
+                    _, elem = self.invoke_dunder(iters, next_name, [], site)
+                    out |= elem
+                    continue
+            out |= frozenset([t])
+        return out
+
+    def _iter_expr(self, expr: ast.expr, *, is_async: bool = False) -> Vals:
+        v = self.eval(expr)
+        if isinstance(expr, _LITERAL_CONTAINERS):
+            return v
+        return self.iterate(v, make_site(self.info.id, expr, "iter"), is_async=is_async)
 
     # ------------------------------------------------------------ calls
     def default_value(self, tok: Closure, d: ast.expr) -> Vals:
@@ -534,8 +605,81 @@ class Interp:
         return self._union(e.values)
 
     def e_Subscript(self, e: ast.Subscript) -> Vals:
-        self.eval(e.slice)
-        return self.eval(e.value)
+        slc = self.eval(e.slice)
+        val = self.eval(e.value)
+        if not isinstance(e.ctx, ast.Load):
+            return EMPTY
+        site = make_site(self.info.id, e, "op")
+        out = EMPTY
+        for t in val:
+            if isinstance(t, Instance):
+                fn = self.state.lookup_class_attr(t.cls, "__getitem__")
+                if fn:
+                    bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
+                    out |= self.apply(bound, [slc], None, {}, None, site)
+                    continue
+            out |= frozenset([t])
+        return out
+
+    def e_BinOp(self, e: ast.BinOp) -> Vals:
+        left = self.eval(e.left)
+        right = self.eval(e.right)
+        spec = BINOP_DUNDERS.get(type(e.op))
+        if spec is None:
+            return EMPTY
+        site = make_site(self.info.id, e, "op")
+        found, out = self.invoke_dunder(left, spec[0], [right], site)
+        if not found:
+            _, out = self.invoke_dunder(right, spec[1], [left], site)
+        return out
+
+    def e_UnaryOp(self, e: ast.UnaryOp) -> Vals:
+        v = self.eval(e.operand)
+        site = make_site(self.info.id, e, "op")
+        if isinstance(e.op, ast.Not):
+            found, _ = self.invoke_dunder(v, "__bool__", [], site)
+            if not found:
+                self.invoke_dunder(v, "__len__", [], site)
+            return EMPTY
+        dunder = UNARYOP_DUNDERS.get(type(e.op))
+        if dunder is None:
+            return EMPTY
+        _, out = self.invoke_dunder(v, dunder, [], site)
+        return out
+
+    def e_Compare(self, e: ast.Compare) -> Vals:
+        left = self.eval(e.left)
+        site = make_site(self.info.id, e, "op")
+        for op, comp in zip(e.ops, e.comparators):
+            right = self.eval(comp)
+            if isinstance(op, (ast.In, ast.NotIn)):
+                self.invoke_dunder(right, "__contains__", [left], site)
+            else:
+                spec = CMP_DUNDERS.get(type(op))
+                if spec is not None:
+                    found, _ = self.invoke_dunder(left, spec[0], [right], site)
+                    if not found:
+                        self.invoke_dunder(right, spec[1], [left], site)
+            left = right
+        return EMPTY
+
+    def e_FormattedValue(self, e: ast.FormattedValue) -> Vals:
+        v = self.eval(e.value)
+        self.eval(e.format_spec)
+        site = make_site(self.info.id, e, "op")
+        if e.conversion == ord("r"):
+            self.invoke_dunder(v, "__repr__", [], site)
+        elif e.conversion == ord("s"):
+            found, _ = self.invoke_dunder(v, "__str__", [], site)
+            if not found:
+                self.invoke_dunder(v, "__repr__", [], site)
+        else:
+            found, _ = self.invoke_dunder(v, "__format__", [EMPTY], site)
+            if not found:
+                found, _ = self.invoke_dunder(v, "__str__", [], site)
+            if not found:
+                self.invoke_dunder(v, "__repr__", [], site)
+        return EMPTY
 
     def e_Starred(self, e: ast.Starred) -> Vals:
         return self.eval(e.value)
@@ -621,7 +765,7 @@ class Interp:
 
     def _comp(self, gens: list[ast.comprehension]) -> None:
         for g in gens:
-            self.assign(g.target, self.eval(g.iter))
+            self.assign(g.target, self._iter_expr(g.iter, is_async=bool(g.is_async)))
             for c in g.ifs:
                 self.eval(c)
 
@@ -699,7 +843,16 @@ class Interp:
             self.assign(t, v)
 
     def s_AugAssign(self, s: ast.AugAssign) -> None:
-        self.assign(s.target, self.eval(s.value))
+        rhs = self.eval(s.value)
+        lhs = self.lookup(s.target.id) if isinstance(s.target, ast.Name) else EMPTY
+        spec = BINOP_DUNDERS.get(type(s.op))
+        res = EMPTY
+        if spec is not None and lhs:
+            site = make_site(self.info.id, s.value, "op")
+            found, res = self.invoke_dunder(lhs, spec[2], [rhs], site)
+            if not found:
+                _, res = self.invoke_dunder(lhs, spec[0], [rhs], site)
+        self.assign(s.target, res | rhs)
 
     def s_AnnAssign(self, s: ast.AnnAssign) -> None:
         if s.value is not None:
@@ -723,6 +876,10 @@ class Interp:
                                     self.apply(bound, [frozenset([obj])], None, {}, None, site)
                         if fdels:
                             self.apply(fdels, [frozenset([obj])], None, {}, None, site)
+            elif isinstance(t, ast.Subscript):
+                slc = self.eval(t.slice)
+                obj = self.eval(t.value)
+                self.invoke_dunder(obj, "__delitem__", [slc], make_site(self.info.id, t, "op"))
             else:
                 self.eval(t)
 
@@ -730,18 +887,26 @@ class Interp:
         self.ret |= self.eval(s.value)
 
     def s_For(self, s: ast.For | ast.AsyncFor) -> None:
-        self.assign(s.target, self.eval(s.iter))
+        self.assign(s.target, self._iter_expr(s.iter, is_async=isinstance(s, ast.AsyncFor)))
         self.block(s.body)
         self.block(s.orelse)
 
     s_AsyncFor = s_For
 
     def s_With(self, s: ast.With | ast.AsyncWith) -> None:
+        enter_name = "__aenter__" if isinstance(s, ast.AsyncWith) else "__enter__"
+        exit_name = "__aexit__" if isinstance(s, ast.AsyncWith) else "__exit__"
+        exits: list[tuple[Vals, Site]] = []
         for it in s.items:
             v = self.eval(it.context_expr)
+            site = make_site(self.info.id, it.context_expr, "with")
+            found, entered = self.invoke_dunder(v, enter_name, [], site)
+            exits.append((v, site))
             if it.optional_vars is not None:
-                self.assign(it.optional_vars, v)
+                self.assign(it.optional_vars, entered if found else v)
         self.block(s.body)
+        for v, site in reversed(exits):
+            self.invoke_dunder(v, exit_name, [EMPTY, EMPTY, EMPTY], site)
 
     s_AsyncWith = s_With
 

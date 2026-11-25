@@ -124,26 +124,103 @@ def _filter(it: Interp, a: Args, site: Site) -> Vals:
 @stub("sorted")
 def _sorted(it: Interp, a: Args, site: Site) -> Vals:
     elems = a.get(0)
-    call(it, a.kw("key"), [elems], site)
+    key = a.kw("key")
+    if key:
+        keys = call(it, key, [elems], site)
+        it.invoke_dunder(keys, "__lt__", [keys], site)
+    else:
+        it.invoke_dunder(elems, "__lt__", [elems], site)
     return elems
 
 
 @stub("min", "max")
 def _minmax(it: Interp, a: Args, site: Site) -> Vals:
     elems = a.pos[0] if len(a.pos) == 1 and a.star is None else a.rest(0)
-    call(it, a.kw("key"), [elems], site)
+    key = a.kw("key")
+    if key:
+        keys = call(it, key, [elems], site)
+        it.invoke_dunder(keys, "__lt__", [keys], site)
+    else:
+        it.invoke_dunder(elems, "__lt__", [elems], site)
     return elems | a.kw("default")
 
 
 @stub("list.sort")
 def _list_sort(it: Interp, a: Args, site: Site) -> Vals:
-    call(it, a.kw("key"), [a.get(0)], site)  # a.pos[0] is the bound receiver
+    elems = a.get(0)
+    key = a.kw("key")
+    if key:
+        keys = call(it, key, [elems], site)
+        it.invoke_dunder(keys, "__lt__", [keys], site)
+    else:
+        it.invoke_dunder(elems, "__lt__", [elems], site)
     return EMPTY
 
 
 @stub("dict.get")
 def _dict_get(it: Interp, a: Args, site: Site) -> Vals:
     return a.get(0) | a.get(2, "default")
+
+
+@stub("len")
+def _len(it: Interp, a: Args, site: Site) -> Vals:
+    it.invoke_dunder(a.get(0), "__len__", [], site)
+    return EMPTY
+
+
+@stub("str")
+def _str(it: Interp, a: Args, site: Site) -> Vals:
+    v = a.get(0)
+    found, _ = it.invoke_dunder(v, "__str__", [], site)
+    if not found:
+        it.invoke_dunder(v, "__repr__", [], site)
+    return EMPTY
+
+
+@stub("repr")
+def _repr(it: Interp, a: Args, site: Site) -> Vals:
+    it.invoke_dunder(a.get(0), "__repr__", [], site)
+    return EMPTY
+
+
+@stub("bool")
+def _bool(it: Interp, a: Args, site: Site) -> Vals:
+    v = a.get(0)
+    found, _ = it.invoke_dunder(v, "__bool__", [], site)
+    if not found:
+        it.invoke_dunder(v, "__len__", [], site)
+    return EMPTY
+
+
+@stub("hash")
+def _hash(it: Interp, a: Args, site: Site) -> Vals:
+    it.invoke_dunder(a.get(0), "__hash__", [], site)
+    return EMPTY
+
+
+@stub("iter")
+def _iter(it: Interp, a: Args, site: Site) -> Vals:
+    v = a.get(0)
+    found, out = it.invoke_dunder(v, "__iter__", [], site)
+    return out if found else v
+
+
+@stub("next")
+def _next(it: Interp, a: Args, site: Site) -> Vals:
+    v = a.get(0)
+    default = a.get(1)
+    found, out = it.invoke_dunder(v, "__next__", [], site)
+    return (out if found else v) | default
+
+
+@stub("reversed")
+def _reversed(it: Interp, a: Args, site: Site) -> Vals:
+    v = a.get(0)
+    found, out = it.invoke_dunder(v, "__reversed__", [], site)
+    if found:
+        _, elem = it.invoke_dunder(out, "__next__", [], site)
+        return elem or out
+    return it.iterate(v, site)
 
 
 @stub("classmethod")
@@ -269,10 +346,10 @@ def _dataclass_init(it: Interp, a: Args, site: Site) -> Vals:
     return EMPTY
 
 
-@stub("list", "tuple", "set", "frozenset", "dict", "iter", "next", "reversed",
-      "enumerate", "zip", "itertools.chain", "itertools.cycle", "itertools.islice")
+@stub("list", "tuple", "set", "frozenset", "dict", "enumerate", "zip",
+      "itertools.chain", "itertools.cycle", "itertools.islice")
 def _passthrough(it: Interp, a: Args, site: Site) -> Vals:
-    return a.all()
+    return it.iterate(a.all(), site)
 
 
 # ---------------------------------------------------------------- functools / itertools
