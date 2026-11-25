@@ -684,3 +684,125 @@ functools.partial(Wrapper(target), 1)()
         ("Wrapper.__call__", "target"),
         ("Key.__call__", "target"),
     }
+
+
+def test_property_getter_setter_deleter_and_call_form() -> None:
+    src = """
+def on_get():
+    return 1
+
+def on_set(v):
+    return v
+
+def on_del():
+    return 0
+
+def raw_get(self):
+    return on_get()
+
+class Box:
+    @property
+    def val(self):
+        return on_get()
+
+    @val.setter
+    def val(self, v):
+        on_set(v)
+
+    @val.deleter
+    def val(self):
+        on_del()
+
+    raw = property(raw_get)
+
+b = Box()
+b.val
+b.val = 10
+del b.val
+b.raw
+"""
+    assert edges(src) == {
+        ("<module>", "Box.val"),
+        ("<module>", "raw_get"),
+        ("Box.val", "on_get"),
+        ("Box.val", "on_set"),
+        ("Box.val", "on_del"),
+        ("raw_get", "on_get"),
+    }
+
+
+def test_descriptors_and_getattr_precision() -> None:
+    src = """
+def load():
+    return 1
+
+def store(v):
+    return v
+
+def drop():
+    return 0
+
+def fallback(n):
+    return n
+
+class Desc:
+    def __get__(self, obj, owner):
+        return load()
+
+    def __set__(self, obj, v):
+        store(v)
+
+    def __delete__(self, obj):
+        drop()
+
+class Safe:
+    d = Desc()
+
+    def __init__(self):
+        self.x = 123
+
+    def __getattr__(self, name):
+        return fallback(name)
+
+    def __setattr__(self, name, v):
+        super().__setattr__(name, v)
+
+s = Safe()
+s.x       # exists via self.x: must NOT trigger __getattr__
+s.d
+Safe.d
+s.d = 1
+del s.d
+"""
+    assert edges(src) == {
+        ("<module>", "Safe.__init__"),
+        ("<module>", "Desc.__get__"),
+        ("<module>", "Safe.__setattr__"),
+        ("<module>", "Desc.__delete__"),
+        ("Safe.__init__", "Safe.__setattr__"),
+        ("Safe.__setattr__", "Desc.__set__"),
+        ("Desc.__get__", "load"),
+        ("Desc.__set__", "store"),
+        ("Desc.__delete__", "drop"),
+    }
+
+
+def test_getattr_fires_on_missing_and_records_attr_site() -> None:
+    src = """
+def miss(n):
+    return n
+
+class Dyn:
+    def __getattr__(self, name):
+        return miss(name)
+
+d = Dyn()
+d.unknown
+"""
+    cg = analyze_source(src, id_style="short")
+    assert set(cg.function_edges()) == {
+        ("<module>", "Dyn.__getattr__"),
+        ("Dyn.__getattr__", "miss"),
+    }
+    attr_sites = [s for s in cg.sites if s.kind == "attr"]
+    assert any(s.text == "d.unknown" and "Dyn.__getattr__" in cg.targets(s) for s in attr_sites)

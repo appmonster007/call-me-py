@@ -47,7 +47,11 @@ def build_callgraph(prog: Program, state: State, style: str = "full") -> CallGra
     edges = tuple(sorted(state.edges, key=lambda e: (
         e.caller.func.uid, e.site.line, e.site.col, e.site.kind, node_label(e.callee))))
     reach = {n.func for n in nodes}
-    sites = tuple(s for f in prog.funcs if f in reach for s in call_sites(prog, f))
+    syntactic = [s for f in prog.funcs if f in reach for s in call_sites(prog, f)]
+    syn_set = set(syntactic)
+    implicit = sorted({e.site for e in edges if e.site not in syn_set},
+                      key=lambda s: (s.caller.uid, s.line, s.col, s.kind))
+    sites = tuple(syntactic) + tuple(implicit)
     by_label: dict[str, list[Node]] = {}
     for n in nodes:
         by_label.setdefault(node_label(n, style), []).append(n)

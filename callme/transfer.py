@@ -28,6 +28,7 @@ from .model import (
     Instance,
     Node,
     ParamState,
+    Property,
     Site,
     StaticMethod,
     Super,
@@ -75,21 +76,21 @@ class State:
         self.changed = False
 
     def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
-        if not vals:
-            return
         attrs = self.class_attrs.setdefault(cls, {})
-        old = attrs.get(name, EMPTY)
-        if not vals <= old:
-            attrs[name] = old | vals
+        if name not in attrs:
+            attrs[name] = vals
+            self.changed = True
+        elif not vals <= attrs[name]:
+            attrs[name] = attrs[name] | vals
             self.changed = True
 
     def add_inst_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
-        if not vals:
-            return
         attrs = self.inst_attrs.setdefault(cls, {})
-        old = attrs.get(name, EMPTY)
-        if not vals <= old:
-            attrs[name] = old | vals
+        if name not in attrs:
+            attrs[name] = vals
+            self.changed = True
+        elif not vals <= attrs[name]:
+            attrs[name] = attrs[name] | vals
             self.changed = True
 
     def add_bases(self, cls: ClassId, new_bases: Sequence[ClassId]) -> None:
@@ -149,10 +150,13 @@ class State:
             except ValueError:
                 return EMPTY
         for c in order:
-            vals = self.class_attrs.get(c, {}).get(name, EMPTY)
-            if vals:
-                return vals
+            attrs = self.class_attrs.get(c)
+            if attrs is not None and name in attrs:
+                return attrs[name]
         return EMPTY
+
+    def has_class_attr(self, cls: ClassId, name: str) -> bool:
+        return any(name in self.class_attrs.get(c, {}) for c in self.mro(cls))
 
     def register(self, node: Node) -> None:
         group = self.by_func.setdefault(node.func, set())
@@ -267,20 +271,45 @@ class Interp:
             return frozenset([Builtin(name)])
         return EMPTY  # unresolved
 
-    def set_attr(self, objs: Vals, attr: str, vals: Vals) -> None:
-        if not vals or self.readonly:
-            return
+    def invoke_data_descriptor_set(self, obj: Instance, cls_vals: Vals,
+                                   vals: Vals, site: Site) -> bool:
+        """Invoke `Property.fset` or descriptor `__set__` in `cls_vals`; return True if any fired."""
+        fsets = EMPTY
+        handled = False
+        for tok in cls_vals:
+            if isinstance(tok, Property) and tok.fset:
+                fsets |= tok.fset
+            elif isinstance(tok, Instance):
+                set_fn = self.state.lookup_class_attr(tok.cls, "__set__")
+                if set_fn:
+                    bound = frozenset(_bind_attr(f, tok.cls, tok) for f in set_fn)
+                    self.apply(bound, [frozenset([obj]), vals], None, {}, None, site)
+                    handled = True
+        if fsets:
+            self.apply(fsets, [frozenset([obj]), vals], None, {}, None, site)
+            handled = True
+        return handled
+
+    def set_attr(self, objs: Vals, attr: str, vals: Vals, site: Site) -> None:
         for t in objs:
             if isinstance(t, Instance):
-                self.state.add_inst_attr(t.cls, attr, vals)
-            elif isinstance(t, ClassObj):
+                setattr_fn = self.state.lookup_class_attr(t.cls, "__setattr__")
+                if setattr_fn:
+                    bound = frozenset(_bind_attr(f, t.cls, t) for f in setattr_fn)
+                    self.apply(bound, [EMPTY, vals], None, {}, None, site)
+                    continue
+                cls_vals = self.state.lookup_class_attr(t.cls, attr)
+                if not self.invoke_data_descriptor_set(t, cls_vals, vals, site):
+                    if not self.readonly:
+                        self.state.add_inst_attr(t.cls, attr, vals)
+            elif isinstance(t, ClassObj) and not self.readonly:
                 self.state.add_class_attr(t.cls, attr, vals)
 
     def assign(self, t: ast.expr, vals: Vals) -> None:
         if isinstance(t, ast.Name):
             self.bind(t.id, vals)
         elif isinstance(t, ast.Attribute):
-            self.set_attr(self.eval(t.value), t.attr, vals)
+            self.set_attr(self.eval(t.value), t.attr, vals, make_site(self.info.id, t, "attr"))
         elif isinstance(t, ast.Subscript):
             self.eval(t.slice)
             if isinstance(t.value, (ast.Name, ast.Attribute, ast.Subscript)):
@@ -389,7 +418,7 @@ class Interp:
                     bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
                     out |= self.apply(bound_call, pos, star, kws, kwstar, site)
                 continue
-            if isinstance(tok, (ClassMethod, Super)):
+            if isinstance(tok, (ClassMethod, Super, Property)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -514,21 +543,63 @@ class Interp:
     def e_Await(self, e: ast.Await) -> Vals:
         return self.eval(e.value)
 
+    def _has_instance_attr(self, cls: ClassId, attr: str) -> bool:
+        if attr in self.state.inst_attrs.get(cls, {}) or self.state.has_class_attr(cls, attr):
+            return True
+        return any(attr in self.prog.classes[c].known_attrs for c in self.state.mro(cls))
+
     def e_Attribute(self, e: ast.Attribute) -> Vals:
         v = self.eval(e.value)
         if not isinstance(e.ctx, ast.Load):
             return EMPTY
         out: set[Token] = set()
+        site = make_site(self.info.id, e, "attr")
         for t in v:
             if isinstance(t, Builtin) and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
+            elif isinstance(t, Property):
+                if e.attr in ("getter", "setter", "deleter"):
+                    out.add(Builtin(f"<property_{e.attr}>", (frozenset([t]),)))
+                elif e.attr == "fget":
+                    out.update(t.fget)
+                elif e.attr == "fset":
+                    out.update(t.fset)
+                elif e.attr == "fdel":
+                    out.update(t.fdel)
             elif isinstance(t, ClassObj):
                 for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
+                    if isinstance(attr_tok, Instance):
+                        get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
+                        if get_fn:
+                            bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
+                            out.update(self.apply(bound, [EMPTY, frozenset([t])], None, {}, None, site))
+                            continue
                     out.add(_bind_attr(attr_tok, t.cls, t))
             elif isinstance(t, Instance):
                 out.update(self.state.inst_attrs.get(t.cls, {}).get(e.attr, EMPTY))
-                for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
-                    out.add(_bind_attr(attr_tok, t.cls, t))
+                cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
+                fgets = EMPTY
+                for attr_tok in cls_vals:
+                    if isinstance(attr_tok, Property):
+                        fgets |= attr_tok.fget
+                    elif isinstance(attr_tok, Instance):
+                        get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
+                        if get_fn:
+                            bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
+                            out.update(self.apply(
+                                bound, [frozenset([t]), frozenset([ClassObj(t.cls)])],
+                                None, {}, None, site))
+                        else:
+                            out.add(attr_tok)
+                    else:
+                        out.add(_bind_attr(attr_tok, t.cls, t))
+                if fgets:
+                    out.update(self.apply(fgets, [frozenset([t])], None, {}, None, site))
+                if not self._has_instance_attr(t.cls, e.attr):
+                    getattr_fn = self.state.lookup_class_attr(t.cls, "__getattr__")
+                    if getattr_fn:
+                        bound = frozenset(_bind_attr(f, t.cls, t) for f in getattr_fn)
+                        out.update(self.apply(bound, [EMPTY], None, {}, None, site))
             elif isinstance(t, Super):
                 found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
                 if found:
@@ -536,6 +607,8 @@ class Interp:
                         out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
                 elif e.attr == "__new__":
                     out.add(Builtin("object.__new__"))
+                elif e.attr == "__setattr__":
+                    out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
         if e.attr in METHOD_STUBS and not out:  # xs.sort(key=...), d.get(k, default)
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
@@ -631,6 +704,27 @@ class Interp:
     def s_AnnAssign(self, s: ast.AnnAssign) -> None:
         if s.value is not None:
             self.assign(s.target, self.eval(s.value))
+
+    def s_Delete(self, s: ast.Delete) -> None:
+        for t in s.targets:
+            if isinstance(t, ast.Attribute):
+                site = make_site(self.info.id, t, "attr")
+                for obj in self.eval(t.value):
+                    if isinstance(obj, Instance):
+                        cls_vals = self.state.lookup_class_attr(obj.cls, t.attr)
+                        fdels = EMPTY
+                        for tok in cls_vals:
+                            if isinstance(tok, Property) and tok.fdel:
+                                fdels |= tok.fdel
+                            elif isinstance(tok, Instance):
+                                del_fn = self.state.lookup_class_attr(tok.cls, "__delete__")
+                                if del_fn:
+                                    bound = frozenset(_bind_attr(f, tok.cls, tok) for f in del_fn)
+                                    self.apply(bound, [frozenset([obj])], None, {}, None, site)
+                        if fdels:
+                            self.apply(fdels, [frozenset([obj])], None, {}, None, site)
+            else:
+                self.eval(t)
 
     def s_Return(self, s: ast.Return) -> None:
         self.ret |= self.eval(s.value)

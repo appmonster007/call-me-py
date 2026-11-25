@@ -27,6 +27,7 @@ from .model import (
     ClassMethod,
     ClassObj,
     Instance,
+    Property,
     Site,
     StaticMethod,
     Super,
@@ -174,6 +175,37 @@ def _super(it: Interp, a: Args, site: Site) -> Vals:
     return frozenset(Super(s, r) for s in starts for r in recvs)
 
 
+def _prop_fn(v: Vals) -> Vals:
+    return frozenset(t for t in v if not isinstance(t, Property) and t.depth <= MAX_PARTIAL_DEPTH)
+
+
+@stub("property")
+def _property(it: Interp, a: Args, site: Site) -> Vals:
+    return frozenset([Property(
+        _prop_fn(a.get(0, "fget")),
+        _prop_fn(a.get(1, "fset")),
+        _prop_fn(a.get(2, "fdel")),
+    )])
+
+
+@stub("<property_getter>")
+def _property_getter(it: Interp, a: Args, site: Site) -> Vals:
+    fn = _prop_fn(a.get(1))
+    return frozenset(Property(fn, p.fset, p.fdel) for p in a.get(0) if isinstance(p, Property))
+
+
+@stub("<property_setter>")
+def _property_setter(it: Interp, a: Args, site: Site) -> Vals:
+    fn = _prop_fn(a.get(1))
+    return frozenset(Property(p.fget, fn, p.fdel) for p in a.get(0) if isinstance(p, Property))
+
+
+@stub("<property_deleter>")
+def _property_deleter(it: Interp, a: Args, site: Site) -> Vals:
+    fn = _prop_fn(a.get(1))
+    return frozenset(Property(p.fget, p.fset, fn) for p in a.get(0) if isinstance(p, Property))
+
+
 @stub("object")
 def _object(it: Interp, a: Args, site: Site) -> Vals:
     return EMPTY
@@ -182,6 +214,22 @@ def _object(it: Interp, a: Args, site: Site) -> Vals:
 @stub("object.__new__")
 def _object_new(it: Interp, a: Args, site: Site) -> Vals:
     return frozenset(Instance(t.cls) for t in a.get(0) if isinstance(t, ClassObj))
+
+
+@stub("object.__setattr__")
+def _object_setattr(it: Interp, a: Args, site: Site) -> Vals:
+    """Bypass custom __setattr__: dispatch to data descriptors on the target's MRO."""
+    val = a.get(2)
+    for obj in a.get(0):
+        if isinstance(obj, Instance):
+            seen: set[str] = set()
+            for c in it.state.mro(obj.cls):
+                for attr, toks in list(it.state.class_attrs.get(c, {}).items()):
+                    if attr in seen:
+                        continue
+                    seen.add(attr)
+                    it.invoke_data_descriptor_set(obj, toks, val, site)
+    return EMPTY
 
 
 def _apply_dataclass(it: Interp, cls_vals: Vals) -> Vals:

@@ -48,6 +48,7 @@ class ClassInfo:
     node: ast.ClassDef
     parent: FuncId  # lexical enclosing function (or module)
     body: tuple[ast.stmt, ...]
+    known_attrs: frozenset[str] = frozenset()  # statically declared / self-assigned attrs
 
 
 @dataclass(eq=False)
@@ -124,6 +125,24 @@ def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[st
     return frozenset(names - declared)
 
 
+def class_known_attrs(body: Sequence[ast.stmt]) -> frozenset[str]:
+    """Attribute names statically declared in a class body or assigned to `self.<attr>`."""
+    names: set[str] = set()
+    for n in walk_scope(body):
+        if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            names.add(n.target.id)
+        elif isinstance(n, FUNC_NODES):
+            pos = [a.arg for a in n.args.posonlyargs + n.args.args]
+            if not pos:
+                continue
+            self_name = pos[0]
+            for inner in walk_scope(n.body):
+                if (isinstance(inner, ast.Attribute) and isinstance(inner.ctx, ast.Store)
+                        and isinstance(inner.value, ast.Name) and inner.value.id == self_name):
+                    names.add(inner.attr)
+    return frozenset(names)
+
+
 # ---------------------------------------------------------------- program
 def build_program(source: str, filename: str = "<string>") -> Program:
     tree = ast.parse(source, filename=filename)
@@ -167,7 +186,8 @@ def build_program(source: str, filename: str = "<string>") -> Program:
             walk(node.body, prefix, fid, None)
         elif isinstance(node, ast.ClassDef):
             cid = ClassId(prefix + node.name, filename, node.lineno, node.col_offset)
-            classes[cid] = ClassInfo(cid, node, parent, tuple(node.body))
+            classes[cid] = ClassInfo(cid, node, parent, tuple(node.body),
+                                     class_known_attrs(node.body))
             class_by_node[id(node)] = cid
             for n in outer_parts(node):
                 walk(n, prefix, parent, None)

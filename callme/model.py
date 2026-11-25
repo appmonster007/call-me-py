@@ -11,6 +11,7 @@ Vocabulary:
   ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
   StaticMethod a *token*: `staticmethod(func)` descriptor returning `func` unbound
   Super        a *token*: `super(start, receiver)` proxy along `receiver`'s MRO
+  Property     a *token*: `property(fget, fset, fdel)` descriptor
   Ctx          a *context*: the abstract entry state of a
                function (param -> set of tokens) plus the captured defining node
   Node         (function, context): one analysed instance of a function
@@ -236,7 +237,29 @@ class Super:
         return self._h
 
 
-Token = Closure | Builtin | ClassObj | Instance | BoundMethod | ClassMethod | StaticMethod | Super
+@dataclass(frozen=True)
+class Property:
+    """Token: `property(fget, fset, fdel)` descriptor."""
+
+    fget: frozenset[Token] = frozenset()
+    fset: frozenset[Token] = frozenset()
+    fdel: frozenset[Token] = frozenset()
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        toks = [*self.fget, *self.fset, *self.fdel]
+        if toks:
+            object.__setattr__(self, "depth", 1 + max(t.depth for t in toks))
+        object.__setattr__(self, "_h", hash(("property", self.fget, self.fset, self.fdel)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+Token = (Closure | Builtin | ClassObj | Instance | BoundMethod
+         | ClassMethod | StaticMethod | Super | Property)
 
 
 def token_label(tok: Token, style: str = "full") -> str:
@@ -258,6 +281,9 @@ def token_label(tok: Token, style: str = "full") -> str:
         return f"staticmethod({token_label(tok.func, style)})"
     if isinstance(tok, Super):
         return f"super({tok.start.render(style)}, {token_label(tok.receiver, style)})"
+    if isinstance(tok, Property):
+        inner = ",".join(sorted(token_label(t, style) for t in tok.fget))
+        return f"property({inner})"
     return tok.func.render(style)
 
 
