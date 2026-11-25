@@ -91,6 +91,7 @@ class State:
     class_attrs: dict[ClassId, Env]  # class-level attribute table per class
     inst_attrs: dict[ClassId, Env]  # instance-level attribute table per class
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
+    metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
@@ -105,6 +106,7 @@ class State:
         self.class_attrs = {}
         self.inst_attrs = {}
         self.bases = {}
+        self.metaclasses = {}
         self._mro_cache = {}
         self.changed = False
 
@@ -137,6 +139,21 @@ class State:
             self.bases[cls] = tup
             self._mro_cache.clear()
             self.changed = True
+
+    def add_metaclass(self, cls: ClassId, meta: ClassId) -> None:
+        if meta == cls:
+            return
+        group = self.metaclasses.setdefault(cls, set())
+        if meta not in group:
+            group.add(meta)
+            self.changed = True
+
+    def get_metaclasses(self, cls: ClassId) -> frozenset[ClassId]:
+        for c in self.mro(cls):
+            ms = self.metaclasses.get(c)
+            if ms:
+                return frozenset(ms)
+        return frozenset()
 
     def mro(self, cls: ClassId) -> tuple[ClassId, ...]:
         cached = self._mro_cache.get(cls)
@@ -451,6 +468,23 @@ class Interp:
         return tuple(sorted(((n, frozenset(v)) for n, v in vals.items() if v),
                             key=lambda p: p[0]))
 
+    def instantiate(self, tok: ClassObj, pos: Sequence[Vals], star: Vals | None,
+                    kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals:
+        """Default `type.__call__`: run `__new__` then `__init__` on `tok`."""
+        new_fn = self.state.lookup_class_attr(tok.cls, "__new__")
+        if new_fn:
+            bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
+            created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
+        else:
+            created = frozenset([Instance(tok.cls)])
+        for obj in created:
+            if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
+                init = self.state.lookup_class_attr(obj.cls, "__init__")
+                if init:
+                    bound_init = frozenset(_bind_attr(t, obj.cls, obj) for t in init)
+                    self.apply(bound_init, pos, star, kws, kwstar, site)
+        return created
+
     def apply(self, callee: Vals, pos: Sequence[Vals], star: Vals | None,
               kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals:
         out = EMPTY
@@ -466,19 +500,18 @@ class Interp:
                                   star, kws, kwstar, site)
                 continue
             if isinstance(tok, ClassObj):
-                new_fn = self.state.lookup_class_attr(tok.cls, "__new__")
-                if new_fn:
-                    bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
-                    created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
+                metas = self.state.get_metaclasses(tok.cls)
+                meta_calls: set[Token] = set()
+                for m in metas:
+                    for fn in self.state.lookup_class_attr(m, "__call__"):
+                        if isinstance(fn, Closure):
+                            meta_calls.add(BoundMethod(fn, tok))
+                        else:
+                            meta_calls.add(_bind_attr(fn, m, tok))
+                if meta_calls:
+                    out |= self.apply(frozenset(meta_calls), pos, star, kws, kwstar, site)
                 else:
-                    created = frozenset([Instance(tok.cls)])
-                for obj in created:
-                    if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
-                        init = self.state.lookup_class_attr(obj.cls, "__init__")
-                        if init:
-                            bound_init = frozenset(_bind_attr(t, obj.cls, obj) for t in init)
-                            self.apply(bound_init, pos, star, kws, kwstar, site)
-                out |= created
+                    out |= self.instantiate(tok, pos, star, kws, kwstar, site)
                 continue
             if isinstance(tok, StaticMethod):
                 out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
@@ -711,7 +744,8 @@ class Interp:
                 elif e.attr == "fdel":
                     out.update(t.fdel)
             elif isinstance(t, ClassObj):
-                for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
+                cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
+                for attr_tok in cls_vals:
                     if isinstance(attr_tok, Instance):
                         get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
                         if get_fn:
@@ -719,6 +753,13 @@ class Interp:
                             out.update(self.apply(bound, [EMPTY, frozenset([t])], None, {}, None, site))
                             continue
                     out.add(_bind_attr(attr_tok, t.cls, t))
+                if not self.state.has_class_attr(t.cls, e.attr):
+                    for m in self.state.get_metaclasses(t.cls):
+                        for attr_tok in self.state.lookup_class_attr(m, e.attr):
+                            if isinstance(attr_tok, Closure):
+                                out.add(BoundMethod(attr_tok, t))
+                            else:
+                                out.add(_bind_attr(attr_tok, m, t))
             elif isinstance(t, Instance):
                 out.update(self.state.inst_attrs.get(t.cls, {}).get(e.attr, EMPTY))
                 cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
@@ -745,14 +786,35 @@ class Interp:
                         bound = frozenset(_bind_attr(f, t.cls, t) for f in getattr_fn)
                         out.update(self.apply(bound, [EMPTY], None, {}, None, site))
             elif isinstance(t, Super):
-                found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
-                if found:
-                    for attr_tok in found:
-                        out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
-                elif e.attr == "__new__":
-                    out.add(Builtin("object.__new__"))
-                elif e.attr == "__setattr__":
-                    out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
+                if isinstance(t.receiver, ClassObj) and t.start not in self.state.mro(t.receiver.cls):
+                    # Metaclass super(Meta, Cls): walk Cls's metaclass MRO after Meta
+                    metas = self.state.get_metaclasses(t.receiver.cls)
+                    found_any = False
+                    for m in metas:
+                        found = self.state.lookup_class_attr(m, e.attr, after=t.start)
+                        if found:
+                            found_any = True
+                            for attr_tok in found:
+                                if isinstance(attr_tok, Closure):
+                                    out.add(BoundMethod(attr_tok, t.receiver))
+                                else:
+                                    out.add(_bind_attr(attr_tok, m, t.receiver))
+                    if not found_any:
+                        if e.attr == "__call__":
+                            out.add(Builtin("type.__call__", (frozenset([t.receiver]),)))
+                        elif e.attr == "__new__":
+                            out.add(Builtin("object.__new__"))
+                        elif e.attr == "__setattr__":
+                            out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
+                else:
+                    found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
+                    if found:
+                        for attr_tok in found:
+                            out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
+                    elif e.attr == "__new__":
+                        out.add(Builtin("object.__new__"))
+                    elif e.attr == "__setattr__":
+                        out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
         if e.attr in METHOD_STUBS and not out:  # xs.sort(key=...), d.get(k, default)
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
@@ -819,18 +881,55 @@ class Interp:
         cid = self.prog.class_by_node[id(s)]
         decs = [self.eval(dec) for dec in s.decorator_list]
         base_ids: list[ClassId] = []
+        bases_val = EMPTY
         for b in s.bases:
-            for t in sorted(self.eval(b), key=token_label):
+            bv = self.eval(b)
+            bases_val |= bv
+            for t in sorted(bv, key=token_label):
                 if isinstance(t, ClassObj):
                     base_ids.append(t.cls)
+        meta_vals = EMPTY
+        extra_kws: dict[str, Vals] = {}
+        extra_kwstar: Vals | None = None
         for k in s.keywords:
-            self.eval(k.value)
-        if not self.readonly and base_ids:
-            self.state.add_bases(cid, base_ids)
+            kv = self.eval(k.value)
+            if k.arg == "metaclass":
+                meta_vals |= kv
+            elif k.arg is None:
+                extra_kwstar = (extra_kwstar or EMPTY) | kv
+            else:
+                extra_kws[k.arg] = extra_kws.get(k.arg, EMPTY) | kv
+        if not self.readonly:
+            if base_ids:
+                self.state.add_bases(cid, base_ids)
+            for t in meta_vals:
+                if isinstance(t, ClassObj):
+                    self.state.add_metaclass(cid, t.cls)
         self.class_stack.append((cid, {}))
         self.block(s.body)
-        self.class_stack.pop()
-        vals: Vals = frozenset([ClassObj(cid)])
+        _, ns = self.class_stack.pop()
+        ns_val = EMPTY
+        for v in ns.values():
+            ns_val |= v
+
+        cls_obj = ClassObj(cid)
+        cls_site = Site(self.info.id, s.lineno, s.col_offset, f"class {s.name}", "class")
+        init_sub = self.state.lookup_class_attr(cid, "__init_subclass__", after=cid)
+        if init_sub:
+            bound_sub = frozenset(_bind_attr(t, cid, cls_obj) for t in init_sub)
+            self.apply(bound_sub, [], None, extra_kws, extra_kwstar, cls_site)
+        for meta_cid in sorted(self.state.get_metaclasses(cid), key=lambda c: c.uid):
+            meta_new = self.state.lookup_class_attr(meta_cid, "__new__")
+            if meta_new:
+                bound_new = frozenset(_bind_attr(t, meta_cid, ClassObj(meta_cid)) for t in meta_new)
+                self.apply(bound_new, [frozenset([ClassObj(meta_cid)]), EMPTY, bases_val, ns_val],
+                           None, extra_kws, extra_kwstar, cls_site)
+            meta_init = self.state.lookup_class_attr(meta_cid, "__init__")
+            if meta_init:
+                self.apply(meta_init, [frozenset([cls_obj]), EMPTY, bases_val, ns_val],
+                           None, extra_kws, extra_kwstar, cls_site)
+
+        vals: Vals = frozenset([cls_obj])
         for dec, callee in reversed(list(zip(s.decorator_list, decs))):
             res = self.apply(callee, [vals], None, {}, None,
                              make_site(self.info.id, dec, "decorator"))

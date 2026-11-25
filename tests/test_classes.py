@@ -920,3 +920,74 @@ f"{s!r}"
         ("Seq.__setitem__", "leaf"),
         ("Seq.__delitem__", "leaf"),
     }
+
+
+def test_init_subclass_with_kwargs_and_super() -> None:
+    src = """
+def on_reg():
+    return 1
+
+def extra_cb():
+    return 2
+
+class Root:
+    def __init_subclass__(cls, **kw):
+        super().__init_subclass__(**kw)
+        on_reg()
+
+class Mid(Root):
+    def __init_subclass__(cls, cb=None, **kw):
+        super().__init_subclass__(**kw)
+        if cb:
+            cb()
+
+class Leaf(Mid, cb=extra_cb):
+    pass
+"""
+    assert edges(src) == {
+        ("<module>", "Root.__init_subclass__"),
+        ("<module>", "Mid.__init_subclass__"),
+        ("Mid.__init_subclass__", "Root.__init_subclass__"),
+        ("Mid.__init_subclass__", "extra_cb"),
+        ("Root.__init_subclass__", "on_reg"),
+    }
+
+
+def test_metaclass_inheritance_submeta_and_meta_methods() -> None:
+    src = """
+def leaf():
+    return 1
+
+class Meta(type):
+    def __call__(cls, *a):
+        return super().__call__(*a)
+
+    def meta_util(cls):
+        return leaf()
+
+class SubMeta(Meta):
+    def __call__(cls, *a):
+        return super().__call__(*a)
+
+class Base(metaclass=SubMeta):
+    def __init__(self):
+        self.setup()
+
+    def setup(self):
+        return leaf()
+
+class Child(Base):
+    pass
+
+Child()
+Child.meta_util()
+"""
+    assert edges(src) == {
+        ("<module>", "SubMeta.__call__"),
+        ("<module>", "Meta.meta_util"),
+        ("SubMeta.__call__", "Meta.__call__"),
+        ("Meta.__call__", "Base.__init__"),
+        ("Base.__init__", "Base.setup"),
+        ("Base.setup", "leaf"),
+        ("Meta.meta_util", "leaf"),
+    }

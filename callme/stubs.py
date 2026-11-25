@@ -288,6 +288,20 @@ def _object(it: Interp, a: Args, site: Site) -> Vals:
     return EMPTY
 
 
+@stub("type")
+def _type(it: Interp, a: Args, site: Site) -> Vals:
+    return EMPTY
+
+
+@stub("type.__call__")
+def _type_call(it: Interp, a: Args, site: Site) -> Vals:
+    out = EMPTY
+    for tok in a.get(0):
+        if isinstance(tok, ClassObj):
+            out |= it.instantiate(tok, a.pos[1:], a.star, a.kws, a.kwstar, site)
+    return out
+
+
 @stub("object.__new__")
 def _object_new(it: Interp, a: Args, site: Site) -> Vals:
     return frozenset(Instance(t.cls) for t in a.get(0) if isinstance(t, ClassObj))
