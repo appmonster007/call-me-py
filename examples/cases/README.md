@@ -1,6 +1,8 @@
 # Call-graph example cases
 
-One case per file (multi-file cases: one directory with a `main.py` entry), numbered from simplest to hardest.
+Cases are sorted into one folder per feature family (`<family>/`), one case per file
+(multi-file cases: one directory with a `main.py` entry). Numbers run from simplest to hardest
+and are unique across families, so a case keeps its number when it moves.
 Each case starts with a docstring:
 
 - `CASE` / `WHY`: what the case tests
@@ -12,49 +14,109 @@ Each case starts with a docstring:
 
 Names: `<module>`, `f`, `Class.method`, `outer.inner`, `<lambda>@<line>`; multi-file cases prefix the module (`pkg.core.run`).
 
+## Families
+
+`tests/test_examples.py` runs `test_sound` / `test_precise` per case with the id `<family>/<case>`.
+Which families run is set in the repository's `pytest.ini`:
+
+    families = all                  # family names, or all
+    exclude_families = classes ...  # subtracted from families
+
+For one run, the command line replaces both settings:
+
+    pytest --families all                 # every family
+    pytest --families hof,stdlib          # only these
+    pytest --exclude-families modules     # all but these
+    pytest -k "stdlib and sound"          # -k still works on the ids
+
+Other families are deselected (not skipped). Families run in the order below (lowest case number first).
+A new family is just a new folder; `families = all` picks it up.
+
+### `basics`: first-order calls, control flow, recursion, dead code
+
 | #  | Case | Feature |
 |----|------|---------|
 | 01 | direct_calls | plain calls, dead code |
 | 02 | control_flow | branches, try/finally, loops, with |
 | 03 | recursion | self / mutual / structural recursion |
+| 25 | dead_conditional | never-executed calls |
+
+### `scoping`: name resolution: closures, comprehension frames, shadowing, global/nonlocal
+
+| #  | Case | Feature |
+|----|------|---------|
 | 04 | closures | nested defs, nonlocal |
+| 12 | generators_comprehensions | comprehension/generator frames |
+| 13 | shadowing_rebinding | scopes, rebinding, shadowed builtins |
+| 14 | scoping_nonlocal_global | global/nonlocal, class scope |
+
+### `hof`: functions as values: lambdas, callbacks, factories, containers, decorators
+
+| #  | Case | Feature |
+|----|------|---------|
 | 05 | lambdas | stored, invoked, in containers |
 | 06 | default_args | callee supplied by a default value |
 | 07 | varargs_kwargs | `*args`, `**kwargs`, keyword binding |
 | 08 | function_as_argument | callbacks, selectors |
 | 09 | return_function | factories, compose, currying |
-| 10 | builtin_hofs | map, filter, sorted(key=), reduce |
 | 11 | dispatch_tables | dicts/lists of functions, observers |
-| 12 | generators_comprehensions | comprehension/generator frames |
-| 13 | shadowing_rebinding | scopes, rebinding, shadowed builtins |
-| 14 | scoping_nonlocal_global | global/nonlocal, class scope |
+| 19 | decorators | plain, parametrised, stacked, class-based |
+| 26 | aliasing_containers | values through lists/dicts/attrs/swaps |
+| 27 | hof_recursion | fixpoint, trampoline, memoize |
+
+### `stdlib`: builtin / stdlib callables that call user code (stubs)
+
+| #  | Case | Feature |
+|----|------|---------|
+| 10 | builtin_hofs | map, filter, sorted(key=), reduce |
+| 20 | partial_and_cache | `partial`, `lru_cache` |
+| 21 | contextmanager | `with` + generator context managers |
+
+### `classes`: methods, constructors, inheritance, receivers
+
+| #  | Case | Feature |
+|----|------|---------|
 | 15 | methods | instance/class/static methods, bound methods |
 | 16 | constructors | `__new__`, `__init__`, dataclass, factories |
 | 17 | inheritance | override, `super()`, polymorphism |
 | 18 | duck_typing | same method name, unrelated classes |
-| 19 | decorators | plain, parametrised, stacked, class-based |
-| 20 | partial_and_cache | `partial`, `lru_cache` |
-| 21 | contextmanager | `with` + generator context managers |
-| 22 | exceptions | exception `__init__`, handlers |
 | 23 | local_nested_classes | classes inside functions/classes |
 | 24 | callable_fields | callbacks stored in fields/lists |
-| 25 | dead_conditional | never-executed calls |
-| 26 | aliasing_containers | values through lists/dicts/attrs/swaps |
-| 27 | hof_recursion | fixpoint, trampoline, memoize |
 | 28 | multiple_inheritance | diamond, cooperative `super()` |
+
+### `implicit`: calls with no call syntax: dunders, properties, hooks, exceptions
+
+| #  | Case | Feature |
+|----|------|---------|
+| 22 | exceptions | exception `__init__`, handlers |
 | 29 | properties_descriptors | property, descriptors, `__getattr__` |
 | 30 | dunder_calls | operators/protocols as implicit calls |
 | 31 | metaclass_hooks | metaclass, `__init_subclass__`, class decorator |
 | 32 | callables_as_callbacks | classes / `__call__` / fget as callbacks |
+
+### `concurrency`: threads, executors, async
+
+| #  | Case | Feature |
+|----|------|---------|
 | 33 | threads_executor | thread targets, executor |
 | 34 | async_basic | await, tasks, gather, call_soon |
 | 35 | async_iter_ctx | async with/for/generators |
+
+### `modules`: multi-file cases: imports, packages, cycles
+
+| #  | Case | Feature |
+|----|------|---------|
 | 36 | modules_alias_imports | aliases, re-exports, relative imports |
 | 37 | modules_star_import | `import *`, `__all__`, re-exported names |
 | 38 | modules_nested_namespace | namespace packages |
 | 39 | modules_circular | circular imports, cross-module cycle |
 | 40 | modules_lazy_conditional | TYPE_CHECKING, try/except import, lazy import |
 | 41 | modules_external_stubs | stdlib stubs, shadowed module name |
+
+### `dynamic`: getattr, eval, monkey patching, runtime classes and imports
+
+| #  | Case | Feature |
+|----|------|---------|
 | 42 | dynamic_getattr | getattr/globals/methodcaller |
 | 43 | dynamic_eval_exec | eval/exec |
 | 44 | dynamic_monkey_patching | runtime method replacement |
@@ -62,7 +124,7 @@ Names: `<module>`, `f`, `Class.method`, `outer.inner`, `<lambda>@<line>`; multi-
 | 46 | dynamic_import | `importlib.import_module` |
 | 47 | dynamic_registry_singledispatch | registries, singledispatch |
 
-Regenerate / verify the EXPECTED blocks (Python 3.9+):
+Regenerate / verify the EXPECTED blocks (Python 3.9+; cases are under `cases/*/`):
 
     python3 tools/trace_calls.py            # rewrite
     python3 tools/trace_calls.py --check    # fail if stale

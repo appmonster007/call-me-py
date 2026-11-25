@@ -6,7 +6,10 @@ Each case's docstring lists `caller -> callee` edges under headers such as `EXPE
   test_sound    every EXPECTED edge is found
   test_precise  nothing is found outside EXPECTED | STATIC_ONLY | SPAWN
 
-Select with -k, e.g. `pytest -k 13_`, `pytest -k sound -x`.
+Cases are grouped into feature families (examples/cases/<family>/); which families run is
+configured in pytest.ini (`families`, `exclude_families`) or with `--families` /
+`--exclude-families`, see tests/conftest.py. Test ids are `<family>/<case>`, so -k also works:
+`pytest -k 13_`, `pytest -k "stdlib and sound"`, `pytest --families all -k sound -x`.
 """
 from __future__ import annotations
 
@@ -26,10 +29,20 @@ Edge = tuple[str, str]
 _HEADER = re.compile(r"^([A-Z_]+)\b[^:]*:\s*$")
 
 
-def _cases() -> list[Path]:
-    files = [p for p in CASES.glob("*.py")]
-    dirs = [d for d in CASES.iterdir() if d.is_dir() and (d / "main.py").is_file()]
-    return sorted(files + dirs, key=lambda p: p.name)
+def _is_case(p: Path) -> bool:
+    """A single-file case (<case>.py) or a multi-file case (<case>/main.py)."""
+    return p.suffix == ".py" if p.is_file() else (p / "main.py").is_file()
+
+
+def _cases() -> list[tuple[str, Path]]:
+    """(family, case) for every case in examples/cases/<family>/ (conftest orders the families)."""
+    stray = sorted(p.name for p in CASES.iterdir() if _is_case(p))
+    if stray:
+        raise RuntimeError(f"cases must live in a family folder of {CASES}: move {', '.join(stray)}")
+    families = [d for d in CASES.iterdir() if d.is_dir() and not d.name.startswith((".", "_"))]
+    return [(fam.name, case)
+            for fam in sorted(families)
+            for case in sorted(p for p in fam.iterdir() if _is_case(p))]
 
 
 def _entry(case: Path) -> Path:
@@ -74,7 +87,9 @@ def _fmt(title: str, edges: set[Edge]) -> str:
     return f"{title}:\n{lines}"
 
 
-CASE_PARAMS = [pytest.param(c, id=c.stem if c.is_file() else c.name) for c in _cases()]
+CASE_PARAMS = [pytest.param(c, id=f"{family}/{c.stem if c.is_file() else c.name}",
+                            marks=pytest.mark.family(family))
+               for family, c in _cases()]
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
