@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING
 
 from .model import (
     EMPTY,
+    Alloc,
     BoundMethod,
+    Box,
     Builtin,
     ClassMethod,
     ClassObj,
@@ -38,7 +40,10 @@ if TYPE_CHECKING:
     from .transfer import Interp
 
 STUB_MODULES = frozenset({"dataclasses", "functools", "itertools"})
-METHOD_STUBS = {"sort": "list.sort", "get": "dict.get"}  # attribute name -> stub (receiver is bound first)
+METHOD_STUBS = {  # attribute name -> stub (receiver is bound first)
+    "sort": "list.sort", "get": "dict.get",
+    **{m: "<elements>" for m in ("values", "items", "keys", "copy", "pop", "popitem")},
+}
 MAX_PARTIAL_ARGS = 4  # bound arguments before a partial is widened to <partial*>
 MAX_PARTIAL_DEPTH = 3  # nesting of tokens inside a partial's arguments
 
@@ -304,7 +309,7 @@ def _type_call(it: Interp, a: Args, site: Site) -> Vals:
 
 @stub("object.__new__")
 def _object_new(it: Interp, a: Args, site: Site) -> Vals:
-    return frozenset(Instance(t.cls) for t in a.get(0) if isinstance(t, ClassObj))
+    return frozenset(Instance(t.cls, Alloc.of(site)) for t in a.get(0) if isinstance(t, ClassObj))
 
 
 @stub("object.__setattr__")
@@ -360,10 +365,27 @@ def _dataclass_init(it: Interp, a: Args, site: Site) -> Vals:
     return EMPTY
 
 
-@stub("list", "tuple", "set", "frozenset", "dict", "enumerate", "zip",
+@stub("tuple", "frozenset", "enumerate", "zip",
       "itertools.chain", "itertools.cycle", "itertools.islice")
 def _passthrough(it: Interp, a: Args, site: Site) -> Vals:
     return it.iterate(a.all(), site)
+
+
+def _container(kind: str) -> StubFn:
+    def fn(it: Interp, a: Args, site: Site) -> Vals:
+        """list(xs) / set(xs) / dict(...): a new container (Box at this call) with the elements."""
+        return it.iterate(a.all(), site) | frozenset([Box(kind, Alloc.of(site))])
+    return fn
+
+
+for _kind in ("list", "set", "dict"):
+    stub(_kind)(_container(_kind))
+
+
+@stub("<elements>")
+def _elements(it: Interp, a: Args, site: Site) -> Vals:
+    """d.values() / d.items() / d.keys() / xs.copy() / xs.pop([i]) / d.pop(k[, default])."""
+    return a.get(0) | union(a.pos[2:])  # receiver's elements (already deref'd) | default
 
 
 # ---------------------------------------------------------------- functools / itertools

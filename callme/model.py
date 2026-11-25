@@ -6,7 +6,9 @@ Vocabulary:
   Closure      a *token*: the abstract value "this function, created in that context"
   Builtin      a *token* for a builtin / stdlib callable modelled by a stub (see stubs.py)
   ClassObj     a *token* representing a class object
-  Instance     a *token* representing an abstract instance of a class
+  Instance     a *token* representing an abstract instance of a class (per allocation site)
+  Box          a *token* for a mutable container (list / dict / set), per allocation site
+  Alloc        an allocation site: where an instance or container is created
   BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
   ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
   StaticMethod a *token*: `staticmethod(func)` descriptor returning `func` unbound
@@ -152,15 +154,34 @@ class ClassObj:
 
 
 @dataclass(frozen=True)
+class Alloc:
+    """Allocation site: the expression in function `func` that creates an object."""
+
+    func: FuncId
+    line: int
+    col: int
+
+    @classmethod
+    def of(cls, site: Site) -> Alloc:
+        """Allocation site of an object created by the call at `site`."""
+        return cls(site.caller, site.line, site.col)
+
+
+@dataclass(frozen=True)
 class Instance:
-    """Token: an abstract instance of `cls`."""
+    """Token: an abstract instance of `cls` created at `alloc` (None = unknown site).
+
+    Instance attributes are stored per token (State.inst_attrs), so two objects of
+    the same class created at different sites keep separate fields.
+    """
 
     cls: ClassId
+    alloc: Alloc | None = None
     depth: int = field(default=0, compare=False)
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_h", hash(("inst", self.cls)))
+        object.__setattr__(self, "_h", hash(("inst", self.cls, self.alloc)))
 
     @override
     def __hash__(self) -> int:
@@ -258,8 +279,30 @@ class Property:
         return self._h
 
 
+@dataclass(frozen=True)
+class Box:
+    """Token: the mutable container (`kind` = list / dict / set) created at `alloc`.
+
+    Values stay collapsed: a container literal evaluates to its elements plus its
+    Box. What is stored into the container later (`xs.append(f)`, `d[k] = f`) goes
+    to State.heap[box], so every alias of the container sees it (State.deref).
+    """
+
+    kind: str
+    alloc: Alloc
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash(("box", self.kind, self.alloc)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
 Token = (Closure | Builtin | ClassObj | Instance | BoundMethod
-         | ClassMethod | StaticMethod | Super | Property)
+         | ClassMethod | StaticMethod | Super | Property | Box)
 
 
 def token_label(tok: Token, style: str = "full") -> str:
@@ -272,7 +315,10 @@ def token_label(tok: Token, style: str = "full") -> str:
     if isinstance(tok, ClassObj):
         return f"<class {tok.cls.render(style)}>"
     if isinstance(tok, Instance):
-        return f"{tok.cls.render(style)}()"
+        at = f"@{tok.alloc.line}:{tok.alloc.col}" if tok.alloc else ""
+        return f"{tok.cls.render(style)}(){at}"
+    if isinstance(tok, Box):
+        return f"<{tok.kind}@{tok.alloc.line}:{tok.alloc.col}>"
     if isinstance(tok, BoundMethod):
         return f"{token_label(tok.func, style)}@{token_label(tok.receiver, style)}"
     if isinstance(tok, ClassMethod):

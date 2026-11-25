@@ -40,6 +40,8 @@ class FuncInfo:
     locals: frozenset[str]
     body: tuple[ast.AST, ...]
     owner: ClassId | None = None  # lexically enclosing class, if defined in a class body
+    globals: frozenset[str] = frozenset()  # names declared `global` (written in the module)
+    nonlocals: frozenset[str] = frozenset()  # names declared `nonlocal` (written in an outer def)
 
 
 @dataclass(eq=False)
@@ -125,6 +127,18 @@ def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[st
     return frozenset(names - declared)
 
 
+def scope_decls(body: Iterable[ast.AST]) -> tuple[frozenset[str], frozenset[str]]:
+    """Names declared `global` and `nonlocal` in one scope."""
+    glob: set[str] = set()
+    nonloc: set[str] = set()
+    for n in walk_scope(body):
+        if isinstance(n, ast.Global):
+            glob.update(n.names)
+        elif isinstance(n, ast.Nonlocal):
+            nonloc.update(n.names)
+    return frozenset(glob), frozenset(nonloc)
+
+
 def class_known_attrs(body: Sequence[ast.stmt]) -> frozenset[str]:
     """Attribute names statically declared in a class body or assigned to `self.<attr>`."""
     names: set[str] = set()
@@ -158,8 +172,9 @@ def build_program(source: str, filename: str = "<string>") -> Program:
         sig = make_sig(args)
         params = [*sig.pos, *sig.kwonly, *([sig.vararg] if sig.vararg else []),
                   *([sig.kwarg] if sig.kwarg else [])]
+        glob, nonloc = scope_decls(body)
         funcs[fid] = FuncInfo(fid, kind, node, parent, sig, scope_locals(body, params),
-                              tuple(body), owner)
+                              tuple(body), owner, glob, nonloc)
         by_node[id(node)] = fid
         return fid
 
@@ -199,6 +214,8 @@ def build_program(source: str, filename: str = "<string>") -> Program:
 
     for s in tree.body:
         walk(s, "", mod)
+    # `global x` makes x a module variable even if the module itself never assigns it
+    funcs[mod].locals |= frozenset(n for f in funcs.values() for n in f.globals)
     return Program(filename, tree, mod, funcs, by_node, classes, class_by_node)
 
 

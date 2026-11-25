@@ -1,7 +1,10 @@
 """Abstract interpretation of one function body in one context.
 
 An abstract value is a set of tokens ("which functions may this expression
-be?"): `Closure`s for user code, `Builtin`s for callables modelled in stubs.py. Containers are collapsed to the union of their elements.
+be?"): `Closure`s for user code, `Builtin`s for callables modelled in stubs.py,
+classes and instances. Containers are collapsed to the union of their elements
+plus a `Box` token (their allocation site); what is stored into a container
+after it is created lives in `State.heap[box]` and is read back with `deref`.
 Calls are context sensitive, with the callee's abstract entry state as context:
 
   entering  {param_i -> eval(arg_i)} becomes the callee's context
@@ -16,7 +19,9 @@ from typing import final
 from .extract import FuncInfo, Program, make_site
 from .model import (
     EMPTY,
+    Alloc,
     BoundMethod,
+    Box,
     Builtin,
     ClassId,
     ClassMethod,
@@ -89,7 +94,9 @@ class State:
     edges: set[Edge]
     entry: dict[Node, Env]  # entry states of widened contexts
     class_attrs: dict[ClassId, Env]  # class-level attribute table per class
-    inst_attrs: dict[ClassId, Env]  # instance-level attribute table per class
+    inst_attrs: dict[Instance, Env]  # instance attributes per abstract object
+    heap: dict[Box, Vals]  # what was stored into each container after its creation
+    extern: dict[FuncId, Env]  # writes to a function's locals from inner scopes (global / nonlocal)
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
@@ -105,6 +112,8 @@ class State:
         self.entry = {}
         self.class_attrs = {}
         self.inst_attrs = {}
+        self.heap = {}
+        self.extern = {}
         self.bases = {}
         self.metaclasses = {}
         self._mro_cache = {}
@@ -119,14 +128,46 @@ class State:
             attrs[name] = attrs[name] | vals
             self.changed = True
 
-    def add_inst_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
-        attrs = self.inst_attrs.setdefault(cls, {})
+    def add_inst_attr(self, inst: Instance, name: str, vals: Vals) -> None:
+        attrs = self.inst_attrs.setdefault(inst, {})
         if name not in attrs:
             attrs[name] = vals
             self.changed = True
         elif not vals <= attrs[name]:
             attrs[name] = attrs[name] | vals
             self.changed = True
+
+    def add_heap(self, box: Box, vals: Vals) -> None:
+        old = self.heap.get(box, EMPTY)
+        if not vals <= old:
+            self.heap[box] = old | vals
+            self.changed = True
+
+    def add_extern(self, func: FuncId, name: str, vals: Vals) -> None:
+        env = self.extern.setdefault(func, {})
+        old = env.get(name, EMPTY)
+        if not vals <= old:
+            env[name] = old | vals
+            self.changed = True
+
+    def deref(self, vals: Vals) -> Vals:
+        """`vals` plus everything stored into the containers it may hold (transitively)."""
+        todo = [t for t in vals if isinstance(t, Box)]
+        if not todo or not self.heap:
+            return vals
+        out = set(vals)
+        seen: set[Box] = set()
+        while todo:
+            box = todo.pop()
+            if box in seen:
+                continue
+            seen.add(box)
+            for t in self.heap.get(box, EMPTY):
+                if t not in out:
+                    out.add(t)
+                    if isinstance(t, Box):
+                        todo.append(t)
+        return frozenset(out)
 
     def add_bases(self, cls: ClassId, new_bases: Sequence[ClassId]) -> None:
         old = self.bases.get(cls, ())
@@ -299,6 +340,21 @@ class Interp:
                 self.state.add_class_attr(cid, name, vals)
         elif vals and name in self.info.locals:
             self.env[name] = self.env.get(name, EMPTY) | vals
+        elif vals and not self.readonly and name in self.info.globals:
+            self.state.add_extern(self.prog.module, name, vals)
+        elif vals and not self.readonly and name in self.info.nonlocals:
+            owner = self.nonlocal_owner(name)
+            if owner is not None:
+                self.state.add_extern(owner, name, vals)
+
+    def nonlocal_owner(self, name: str) -> FuncId | None:
+        """Nearest enclosing function that owns local `name` (target of `nonlocal name`)."""
+        f = self.info.parent
+        while f is not None and f != self.prog.module:
+            if name in self.prog.funcs[f].locals:
+                return f
+            f = self.prog.funcs[f].parent
+        return None
 
     def lookup(self, name: str) -> Vals:
         if self.class_stack and name in self.class_stack[-1][1]:
@@ -351,7 +407,7 @@ class Interp:
                 cls_vals = self.state.lookup_class_attr(t.cls, attr)
                 if not self.invoke_data_descriptor_set(t, cls_vals, vals, site):
                     if not self.readonly:
-                        self.state.add_inst_attr(t.cls, attr, vals)
+                        self.state.add_inst_attr(t, attr, vals)
             elif isinstance(t, ClassObj) and not self.readonly:
                 self.state.add_class_attr(t.cls, attr, vals)
 
@@ -365,15 +421,34 @@ class Interp:
             obj = self.eval(t.value)
             found, _ = self.invoke_dunder(obj, "__setitem__", [slc, vals],
                                           make_site(self.info.id, t, "op"))
-            if not found and isinstance(t.value, (ast.Name, ast.Attribute, ast.Subscript)):
-                self.assign(t.value, vals)
+            self.store(t.value, obj, vals, fallback=not found)
         elif isinstance(t, (ast.Tuple, ast.List)):
+            elems = self.state.deref(vals)  # unpacking reads the elements
             for x in t.elts:
-                self.assign(x, vals)
+                self.assign(x, elems)
         elif isinstance(t, ast.Starred):
             self.assign(t.value, vals)
         else:
             self.eval(t)
+
+    def new_box(self, kind: str, e: ast.expr) -> Vals:
+        return frozenset([Box(kind, Alloc(self.info.id, e.lineno, e.col_offset))])
+
+    def store(self, target: ast.expr, recv: Vals, vals: Vals, *, fallback: bool = True) -> None:
+        """Weak update: `vals` stored into the container(s) `recv`, the value of `target`.
+
+        Containers of unknown origin (no Box yet) widen the target expression
+        itself instead, as if the container were the union of its elements.
+        """
+        if not vals:
+            return
+        boxes = [t for t in recv if isinstance(t, Box)]
+        if boxes:
+            if not self.readonly:
+                for box in boxes:
+                    self.state.add_heap(box, vals)
+        elif fallback and isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
+            self.assign(target, vals)
 
     def invoke_dunder(self, recv: Vals, name: str, pos: Sequence[Vals],
                       site: Site) -> tuple[bool, Vals]:
@@ -403,13 +478,13 @@ class Interp:
                     _, elem = self.invoke_dunder(iters, next_name, [], site)
                     out |= elem
                     continue
-            out |= frozenset([t])
+            out |= self.state.deref(frozenset([t]))
         return out
 
     def _iter_expr(self, expr: ast.expr, *, is_async: bool = False) -> Vals:
         v = self.eval(expr)
         if isinstance(expr, _LITERAL_CONTAINERS):
-            return v
+            return self.state.deref(v)
         return self.iterate(v, make_site(self.info.id, expr, "iter"), is_async=is_async)
 
     # ------------------------------------------------------------ calls
@@ -476,7 +551,7 @@ class Interp:
             bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
             created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
         else:
-            created = frozenset([Instance(tok.cls)])
+            created = frozenset([Instance(tok.cls, Alloc.of(site))])
         for obj in created:
             if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
                 init = self.state.lookup_class_attr(obj.cls, "__init__")
@@ -491,8 +566,12 @@ class Interp:
         for tok in callee:
             if isinstance(tok, Builtin):
                 fn = STUBS.get(tok.name)
-                if fn is not None:
-                    args = Args([*tok.bound, *pos], star, {**dict(tok.bound_kw), **kws}, kwstar)
+                if fn is not None:  # stubs read their arguments as elements
+                    d = self.state.deref
+                    args = Args([d(v) for v in (*tok.bound, *pos)],
+                                None if star is None else d(star),
+                                {k: d(v) for k, v in {**dict(tok.bound_kw), **kws}.items()},
+                                None if kwstar is None else d(kwstar))
                     out |= fn(self, args, site)
                 continue
             if isinstance(tok, BoundMethod):
@@ -522,7 +601,7 @@ class Interp:
                     bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
                     out |= self.apply(bound_call, pos, star, kws, kwstar, site)
                 continue
-            if isinstance(tok, (ClassMethod, Super, Property)):
+            if isinstance(tok, (ClassMethod, Super, Property, Box)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -558,51 +637,56 @@ class Interp:
         return frozenset([mk_closure(fid, self.node)])
 
     def e_Call(self, e: ast.Call) -> Vals:
-        callee = self.eval(e.func)
+        recv: Vals | None = None  # receiver of a method call, evaluated once
+        if isinstance(e.func, ast.Attribute):
+            recv = self.eval(e.func.value)
+            callee = self.attribute(recv, e.func)
+        else:
+            callee = self.eval(e.func)
         pos: list[Vals] = []
         star: Vals | None = None  # None = no */** at the call
         kws: dict[str, Vals] = {}
         kwstar: Vals | None = None
         for a in e.args:
             if isinstance(a, ast.Starred):
-                star = (star or EMPTY) | self.eval(a.value)
+                star = (star or EMPTY) | self.state.deref(self.eval(a.value))
             else:
                 pos.append(self.eval(a))
         for k in e.keywords:
             v = self.eval(k.value)
             if k.arg is None:
-                kwstar = (kwstar or EMPTY) | v
+                kwstar = (kwstar or EMPTY) | self.state.deref(v)
             else:
                 kws[k.arg] = kws.get(k.arg, EMPTY) | v
         out = self.apply(callee, pos, star, kws, kwstar, make_site(self.info.id, e))
-        if not callee and isinstance(e.func, ast.Attribute) and isinstance(
-            e.func.value, (ast.Name, ast.Attribute, ast.Subscript)
-        ):
-            out |= self._mutate_container(e.func.value, e.func.attr, pos, star, kws, kwstar)
+        if not callee and recv is not None and isinstance(e.func, ast.Attribute):
+            out |= self._mutate_container(e.func.value, recv, e.func.attr, pos, star, kws, kwstar)
         return out
 
-    def _mutate_container(self, target: ast.expr, method: str, pos: Sequence[Vals],
+    def _mutate_container(self, target: ast.expr, recv: Vals, method: str, pos: Sequence[Vals],
                           star: Vals | None, kws: Mapping[str, Vals],
                           kwstar: Vals | None) -> Vals:
-        """Propagate values inserted into list/set/dict containers (e.g. self.hooks.append(h))."""
+        """Values inserted into list/set/dict containers (xs.append(f), self.hooks.append(h))."""
+        d = self.state.deref
         added = EMPTY
-        if method in ("append", "add", "extend"):
+        if method in ("append", "add"):
             added = (pos[0] if pos else EMPTY) | (star or EMPTY)
+        elif method == "extend":  # takes an iterable: its elements
+            added = d((pos[0] if pos else EMPTY) | (star or EMPTY))
         elif method == "insert":
             added = (pos[1] if len(pos) > 1 else EMPTY) | (star or EMPTY)
         elif method == "setdefault":
             added = ((pos[1] if len(pos) > 1 else EMPTY)
                      | kws.get("default", EMPTY) | (star or EMPTY) | (kwstar or EMPTY))
-            self.assign(target, added)
-            return self.eval(target) | added
+            self.store(target, recv, added)
+            return d(recv) | added
         elif method == "update":
-            added = (pos[0] if pos else EMPTY) | (star or EMPTY) | (kwstar or EMPTY)
+            added = d((pos[0] if pos else EMPTY) | (star or EMPTY) | (kwstar or EMPTY))
             for v in kws.values():
                 added |= v
         else:
             return EMPTY
-        if added:
-            self.assign(target, added)
+        self.store(target, recv, added)
         return EMPTY
 
     def e_IfExp(self, e: ast.IfExp) -> Vals:
@@ -626,16 +710,24 @@ class Interp:
             out |= self.eval(x)
         return out
 
-    def e_List(self, e: ast.List | ast.Tuple | ast.Set) -> Vals:
+    def e_List(self, e: ast.List) -> Vals:
+        return self._union(e.elts) | self.new_box("list", e)
+
+    def e_Set(self, e: ast.Set) -> Vals:
+        return self._union(e.elts) | self.new_box("set", e)
+
+    def e_Tuple(self, e: ast.Tuple) -> Vals:  # immutable: no Box needed
         return self._union(e.elts)
 
-    e_Tuple = e_Set = e_List
-
     def e_Dict(self, e: ast.Dict) -> Vals:
-        for k in e.keys:
-            if k is not None:
+        out = self.new_box("dict", e)
+        for k, v in zip(e.keys, e.values):
+            if k is None:  # {**other}
+                out |= self.state.deref(self.eval(v))
+            else:
                 self.eval(k)
-        return self._union(e.values)
+                out |= self.eval(v)
+        return out
 
     def e_Subscript(self, e: ast.Subscript) -> Vals:
         slc = self.eval(e.slice)
@@ -644,6 +736,7 @@ class Interp:
             return EMPTY
         site = make_site(self.info.id, e, "op")
         out = EMPTY
+        rest: set[Token] = set()
         for t in val:
             if isinstance(t, Instance):
                 fn = self.state.lookup_class_attr(t.cls, "__getitem__")
@@ -651,8 +744,8 @@ class Interp:
                     bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
                     out |= self.apply(bound, [slc], None, {}, None, site)
                     continue
-            out |= frozenset([t])
-        return out
+            rest.add(t)
+        return out | self.state.deref(frozenset(rest))
 
     def e_BinOp(self, e: ast.BinOp) -> Vals:
         left = self.eval(e.left)
@@ -714,21 +807,25 @@ class Interp:
                 self.invoke_dunder(v, "__repr__", [], site)
         return EMPTY
 
-    def e_Starred(self, e: ast.Starred) -> Vals:
-        return self.eval(e.value)
+    def e_Starred(self, e: ast.Starred) -> Vals:  # [*xs]: the elements of xs
+        return self.state.deref(self.eval(e.value))
 
     def e_Await(self, e: ast.Await) -> Vals:
         return self.eval(e.value)
 
-    def _has_instance_attr(self, cls: ClassId, attr: str) -> bool:
-        if attr in self.state.inst_attrs.get(cls, {}) or self.state.has_class_attr(cls, attr):
+    def _has_instance_attr(self, inst: Instance, attr: str) -> bool:
+        if attr in self.state.inst_attrs.get(inst, {}) or self.state.has_class_attr(inst.cls, attr):
             return True
-        return any(attr in self.prog.classes[c].known_attrs for c in self.state.mro(cls))
+        return any(attr in self.prog.classes[c].known_attrs for c in self.state.mro(inst.cls))
 
     def e_Attribute(self, e: ast.Attribute) -> Vals:
         v = self.eval(e.value)
         if not isinstance(e.ctx, ast.Load):
             return EMPTY
+        return self.attribute(v, e)
+
+    def attribute(self, v: Vals, e: ast.Attribute) -> Vals:
+        """Value of `<receiver>.attr` for the already evaluated receiver `v`."""
         out: set[Token] = set()
         site = make_site(self.info.id, e, "attr")
         for t in v:
@@ -761,7 +858,7 @@ class Interp:
                             else:
                                 out.add(_bind_attr(attr_tok, m, t))
             elif isinstance(t, Instance):
-                out.update(self.state.inst_attrs.get(t.cls, {}).get(e.attr, EMPTY))
+                out.update(self.state.inst_attrs.get(t, {}).get(e.attr, EMPTY))
                 cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
                 fgets = EMPTY
                 for attr_tok in cls_vals:
@@ -780,7 +877,7 @@ class Interp:
                         out.add(_bind_attr(attr_tok, t.cls, t))
                 if fgets:
                     out.update(self.apply(fgets, [frozenset([t])], None, {}, None, site))
-                if not self._has_instance_attr(t.cls, e.attr):
+                if not self._has_instance_attr(t, e.attr):
                     getattr_fn = self.state.lookup_class_attr(t.cls, "__getattr__")
                     if getattr_fn:
                         bound = frozenset(_bind_attr(f, t.cls, t) for f in getattr_fn)
@@ -820,7 +917,8 @@ class Interp:
         return frozenset(out)
 
     def e_Yield(self, e: ast.Yield | ast.YieldFrom) -> Vals:
-        self.ret |= self.eval(e.value)
+        v = self.eval(e.value)
+        self.ret |= self.state.deref(v) if isinstance(e, ast.YieldFrom) else v
         return EMPTY
 
     e_YieldFrom = e_Yield
@@ -831,16 +929,20 @@ class Interp:
             for c in g.ifs:
                 self.eval(c)
 
-    def e_ListComp(self, e: ast.ListComp | ast.SetComp | ast.GeneratorExp) -> Vals:
+    def e_GeneratorExp(self, e: ast.ListComp | ast.SetComp | ast.GeneratorExp) -> Vals:
         self._comp(e.generators)
         return self.eval(e.elt)
 
-    e_SetComp = e_GeneratorExp = e_ListComp
+    def e_ListComp(self, e: ast.ListComp) -> Vals:
+        return self.e_GeneratorExp(e) | self.new_box("list", e)
+
+    def e_SetComp(self, e: ast.SetComp) -> Vals:
+        return self.e_GeneratorExp(e) | self.new_box("set", e)
 
     def e_DictComp(self, e: ast.DictComp) -> Vals:
         self._comp(e.generators)
         self.eval(e.key)
-        return self.eval(e.value)
+        return self.eval(e.value) | self.new_box("dict", e)
 
     # ------------------------------------------------------------ statements
     def block(self, stmts: Iterable[ast.AST]) -> None:
@@ -860,7 +962,8 @@ class Interp:
             elif isinstance(c, ast.ExceptHandler):
                 exc = self.eval(c.type)
                 if c.name:
-                    self.bind(c.name, frozenset(Instance(t.cls) for t in exc if isinstance(t, ClassObj)))
+                    at = Alloc(self.info.id, c.lineno, c.col_offset)
+                    self.bind(c.name, frozenset(Instance(t.cls, at) for t in exc if isinstance(t, ClassObj)))
                 self.block(c.body)
 
     def s_FunctionDef(self, s: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -951,6 +1054,8 @@ class Interp:
             found, res = self.invoke_dunder(lhs, spec[2], [rhs], site)
             if not found:
                 _, res = self.invoke_dunder(lhs, spec[0], [rhs], site)
+        if isinstance(s.op, (ast.Add, ast.BitOr)):  # xs += ys / s |= t / d |= e mutate in place
+            self.store(s.target, lhs, self.state.deref(rhs), fallback=False)
         self.assign(s.target, res | rhs)
 
     def s_AnnAssign(self, s: ast.AnnAssign) -> None:
@@ -1037,6 +1142,8 @@ def analyze(node: Node, state: State, prog: Program) -> tuple[Env, Vals, Calls]:
     """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)])."""
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)
+    for name, vals in state.extern.get(node.func, {}).items():  # global / nonlocal writes
+        it.env[name] = it.env.get(name, EMPTY) | vals
     while True:
         snapshot = dict(it.env)
         it.ret, it.calls = EMPTY, []

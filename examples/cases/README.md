@@ -20,7 +20,7 @@ Names: `<module>`, `f`, `Class.method`, `outer.inner`, `<lambda>@<line>`; multi-
 Which families run is set in the repository's `pytest.ini`:
 
     families = all                  # family names, or all
-    exclude_families = classes ...  # subtracted from families
+    exclude_families = implicit ... # subtracted from families
 
 For one run, the command line replaces both settings:
 
@@ -63,6 +63,7 @@ A new family is just a new folder; `families = all` picks it up.
 | 19 | decorators | plain, parametrised, stacked, class-based |
 | 26 | aliasing_containers | values through lists/dicts/attrs/swaps |
 | 27 | hof_recursion | fixpoint, trampoline, memoize |
+| 48 | heap_mutation | stored later: alias append, callee fills list, registry, global |
 
 ### `stdlib`: builtin / stdlib callables that call user code (stubs)
 

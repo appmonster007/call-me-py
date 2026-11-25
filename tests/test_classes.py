@@ -1,8 +1,12 @@
 """Unit tests for Step 1 class & method support."""
 from __future__ import annotations
 
+import pytest
+
 from callme import analyze_source, to_dict, to_dot
 from callme.extract import build_program, call_sites
+
+pytestmark = pytest.mark.family("classes")
 
 
 def edges(src: str) -> set[tuple[str, str]]:
