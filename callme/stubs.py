@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .model import EMPTY, Builtin, Site, Vals
+from .model import EMPTY, Builtin, ClassMethod, Site, StaticMethod, Vals
 
 if TYPE_CHECKING:
     from .transfer import Interp
@@ -127,6 +127,22 @@ def _minmax(it: Interp, a: Args, site: Site) -> Vals:
 def _list_sort(it: Interp, a: Args, site: Site) -> Vals:
     call(it, a.kw("key"), [a.get(0)], site)  # a.pos[0] is the bound receiver
     return EMPTY
+
+
+@stub("classmethod")
+def _classmethod(it: Interp, a: Args, site: Site) -> Vals:
+    return frozenset(
+        t if isinstance(t, ClassMethod) else ClassMethod(t)
+        for t in a.get(0) if isinstance(t, ClassMethod) or t.depth <= MAX_PARTIAL_DEPTH
+    )
+
+
+@stub("staticmethod")
+def _staticmethod(it: Interp, a: Args, site: Site) -> Vals:
+    return frozenset(
+        t if isinstance(t, StaticMethod) else StaticMethod(t)
+        for t in a.get(0) if isinstance(t, StaticMethod) or t.depth <= MAX_PARTIAL_DEPTH
+    )
 
 
 @stub("list", "tuple", "set", "frozenset", "dict", "iter", "next", "reversed",

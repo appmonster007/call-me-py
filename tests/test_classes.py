@@ -259,3 +259,127 @@ Outer.Inner().n()
     dot = to_dot(cg, contexts=True, returns=True)
     assert "Outer()" in dot
     assert "Outer.Inner()" in dot
+
+
+def test_classmethod_and_staticmethod_variants() -> None:
+    src = """
+def util(x):
+    return x
+
+class A:
+    handler = staticmethod(util)
+
+    def __init__(self):
+        self.init_helper()
+
+    def init_helper(self):
+        return 1
+
+    @classmethod
+    def make(cls):
+        return cls()
+
+    @classmethod
+    def via_cls(cls):
+        return cls.make()
+
+    @staticmethod
+    def stat(x):
+        return util(x)
+
+    def run(self):
+        self.via_cls()
+        return self.stat(1)
+
+a = A()
+a.run()
+cm = a.via_cls
+cm()
+a.handler(2)
+A.handler(3)
+staticmethod(util)(4)
+"""
+    assert edges(src) == {
+        ("<module>", "A.__init__"),
+        ("<module>", "A.run"),
+        ("<module>", "A.via_cls"),
+        ("<module>", "util"),
+        ("A.__init__", "A.init_helper"),
+        ("A.run", "A.via_cls"),
+        ("A.run", "A.stat"),
+        ("A.via_cls", "A.make"),
+        ("A.make", "A.__init__"),
+        ("A.stat", "util"),
+    }
+
+
+def test_decorated_instance_and_class_methods() -> None:
+    src = """
+import functools
+
+def trace(fn):
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        return fn(*a, **k)
+    return wrapper
+
+class K:
+    def leaf(self):
+        return 1
+
+    @trace
+    def m(self):
+        return self.leaf()
+
+    @classmethod
+    @trace
+    def build(cls):
+        return cls()
+
+K().m()
+K.build().leaf()
+"""
+    assert edges(src) == {
+        ("<module>", "trace"),
+        ("<module>", "trace.wrapper"),
+        ("<module>", "K.leaf"),
+        ("trace.wrapper", "K.m"),
+        ("trace.wrapper", "K.build"),
+        ("K.m", "K.leaf"),
+    }
+
+
+def test_implicit_new_and_init_subclass_wrapping() -> None:
+    src = """
+def leaf():
+    return 1
+
+class C:
+    def __new__(cls):
+        return cls.make()
+
+    def __init_subclass__(cls):
+        return cls.hook()
+
+    @classmethod
+    def make(cls):
+        return leaf()
+
+    @classmethod
+    def hook(cls):
+        return leaf()
+
+c = C()
+C.__new__(C)
+c.__new__(C)
+C.__init_subclass__()
+c.__init_subclass__()
+"""
+    assert edges(src) == {
+        ("<module>", "C.__new__"),
+        ("<module>", "C.__init_subclass__"),
+        ("C.__new__", "C.make"),
+        ("C.__init_subclass__", "C.hook"),
+        ("C.make", "leaf"),
+        ("C.hook", "leaf"),
+    }

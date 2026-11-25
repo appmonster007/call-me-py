@@ -19,6 +19,7 @@ from .model import (
     BoundMethod,
     Builtin,
     ClassId,
+    ClassMethod,
     ClassObj,
     Closure,
     Ctx,
@@ -28,6 +29,7 @@ from .model import (
     Node,
     ParamState,
     Site,
+    StaticMethod,
     Token,
     Vals,
 )
@@ -115,6 +117,17 @@ def mk_closure(func: FuncId, node: Node | None) -> Closure:
     return Closure(func, node, depth)
 
 
+def _bind_attr(tok: Token, owner_cls: ClassId, receiver: ClassObj | Instance) -> Token:
+    """Apply Python's descriptor binding when reading `tok` via `receiver`."""
+    if isinstance(tok, ClassMethod):
+        return BoundMethod(tok.func, ClassObj(owner_cls))
+    if isinstance(tok, StaticMethod):
+        return tok.func
+    if isinstance(tok, Closure) and isinstance(receiver, Instance):
+        return BoundMethod(tok, receiver)
+    return tok
+
+
 @final
 class Interp:
     prog: Program
@@ -141,6 +154,10 @@ class Interp:
     # ------------------------------------------------------------ names
     def bind(self, name: str, vals: Vals) -> None:
         if self.class_stack:
+            if name == "__new__":
+                vals = frozenset(StaticMethod(t) if isinstance(t, Closure) else t for t in vals)
+            elif name == "__init_subclass__":
+                vals = frozenset(ClassMethod(t) if isinstance(t, Closure) else t for t in vals)
             cid, ns = self.class_stack[-1]
             ns[name] = ns.get(name, EMPTY) | vals
             if not self.readonly:
@@ -254,10 +271,14 @@ class Interp:
                 inst = Instance(tok.cls)
                 init = self.state.class_attrs.get(tok.cls, {}).get("__init__", EMPTY)
                 if init:
-                    self.apply(init, [frozenset([inst]), *pos], star, kws, kwstar, site)
+                    bound_init = frozenset(_bind_attr(t, tok.cls, inst) for t in init)
+                    self.apply(bound_init, pos, star, kws, kwstar, site)
                 out |= frozenset([inst])
                 continue
-            if isinstance(tok, Instance):
+            if isinstance(tok, StaticMethod):
+                out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
+                continue
+            if isinstance(tok, (Instance, ClassMethod)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -361,14 +382,9 @@ class Interp:
         for t in v:
             if isinstance(t, Builtin) and t.name in STUB_MODULES and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
-            elif isinstance(t, ClassObj):
-                out.update(self.state.class_attrs.get(t.cls, {}).get(e.attr, EMPTY))
-            elif isinstance(t, Instance):
+            elif isinstance(t, (ClassObj, Instance)):
                 for attr_tok in self.state.class_attrs.get(t.cls, {}).get(e.attr, EMPTY):
-                    if isinstance(attr_tok, Closure):
-                        out.add(BoundMethod(attr_tok, t))
-                    else:
-                        out.add(attr_tok)
+                    out.add(_bind_attr(attr_tok, t.cls, t))
         if e.attr in METHOD_STUBS:  # xs.sort(key=...): receiver bound as first argument
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)

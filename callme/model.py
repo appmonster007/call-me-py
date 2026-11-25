@@ -8,6 +8,8 @@ Vocabulary:
   ClassObj     a *token* representing a class object
   Instance     a *token* representing an abstract instance of a class
   BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
+  ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
+  StaticMethod a *token*: `staticmethod(func)` descriptor returning `func` unbound
   Ctx          a *context*: the abstract entry state of a
                function (param -> set of tokens) plus the captured defining node
   Node         (function, context): one analysed instance of a function
@@ -181,7 +183,41 @@ class BoundMethod:
         return self._h
 
 
-Token = Closure | Builtin | ClassObj | Instance | BoundMethod
+@dataclass(frozen=True)
+class ClassMethod:
+    """Token: `classmethod(func)` descriptor binding the owner class as first arg."""
+
+    func: Token
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "depth", 1 + self.func.depth)
+        object.__setattr__(self, "_h", hash(("classmethod", self.func)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+@dataclass(frozen=True)
+class StaticMethod:
+    """Token: `staticmethod(func)` descriptor returning `func` unbound."""
+
+    func: Token
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "depth", 1 + self.func.depth)
+        object.__setattr__(self, "_h", hash(("staticmethod", self.func)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+Token = Closure | Builtin | ClassObj | Instance | BoundMethod | ClassMethod | StaticMethod
 
 
 def token_label(tok: Token, style: str = "full") -> str:
@@ -197,6 +233,10 @@ def token_label(tok: Token, style: str = "full") -> str:
         return f"{tok.cls.render(style)}()"
     if isinstance(tok, BoundMethod):
         return f"{token_label(tok.func, style)}@{token_label(tok.receiver, style)}"
+    if isinstance(tok, ClassMethod):
+        return f"classmethod({token_label(tok.func, style)})"
+    if isinstance(tok, StaticMethod):
+        return f"staticmethod({token_label(tok.func, style)})"
     return tok.func.render(style)
 
 
