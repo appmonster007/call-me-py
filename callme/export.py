@@ -5,7 +5,7 @@ import json
 from collections import defaultdict
 
 from .callgraph import CallGraph
-from .model import Node, Site
+from .model import Node, Site, token_label
 
 
 def _site(s: Site) -> dict[str, int | str]:
@@ -15,7 +15,7 @@ def _site(s: Site) -> dict[str, int | str]:
 def _ctx(cg: CallGraph, node: Node) -> dict[str, list[str]]:
     if node.ctx.merged:
         return {"*": []}
-    return {n: sorted({cg.name(t.func) for t in toks}) for n, toks in node.ctx.params}
+    return {n: sorted({token_label(t, cg.style) for t in toks}) for n, toks in node.ctx.params}
 
 
 def to_dict(cg: CallGraph) -> dict[str, object]:

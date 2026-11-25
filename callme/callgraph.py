@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .extract import Program, call_sites
-from .model import Edge, FuncId, Node, Site
+from .model import Edge, FuncId, Node, Site, token_label
 from .transfer import State
 
 
@@ -15,7 +15,7 @@ def node_label(node: Node, style: str = "full") -> str:
     if not c.params:
         return fn
     parts = ", ".join(
-        f"{n}={{{','.join(sorted({t.func.render(style) for t in toks}))}}}" for n, toks in c.params)
+        f"{n}={{{','.join(sorted({token_label(t, style) for t in toks}))}}}" for n, toks in c.params)
     return f"{fn}[{parts}]"
 
 

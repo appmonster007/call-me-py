@@ -1,7 +1,7 @@
 """Abstract interpretation of one function body in one context.
 
-An abstract value is a set of `Closure` tokens ("which functions may this
-expression be?"). Containers are collapsed to the union of their elements.
+An abstract value is a set of tokens ("which functions may this expression
+be?"): `Closure`s for user code, `Builtin`s for callables modelled in stubs.py. Containers are collapsed to the union of their elements.
 Calls are context sensitive, with the callee's abstract entry state as context:
 
   entering  {param_i -> eval(arg_i)} becomes the callee's context
@@ -14,13 +14,13 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import final
 
 from .extract import FuncInfo, Program, make_site
-from .model import Closure, Ctx, Edge, FuncId, Node, ParamState, Site
+from .model import EMPTY, Builtin, Closure, Ctx, Edge, FuncId, Node, ParamState, Site, Vals
+from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUBS, Args
 
-Vals = frozenset[Closure]
 Env = dict[str, Vals]
 Calls = list[tuple[Site, Node]]
 
-EMPTY: Vals = frozenset()
+__all__ = ["EMPTY", "Vals", "Env", "State", "Interp", "analyze"]
 MAX_DEPTH = 3  # nesting of captured contexts before widening to "unknown parent"
 
 
@@ -131,7 +131,9 @@ class Interp:
                 return self.state.union_env(f, name)
             parent_node = parent_node.ctx.parent if parent_node is not None else None
             f = pinfo.parent
-        return EMPTY  # builtin / unresolved
+        if name in BUILTIN_NAMES:  # not shadowed anywhere: the builtin
+            return frozenset([Builtin(name)])
+        return EMPTY  # unresolved
 
     def assign(self, t: ast.expr, vals: Vals) -> None:
         if isinstance(t, ast.Name):
@@ -204,6 +206,12 @@ class Interp:
               kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals:
         out = EMPTY
         for tok in callee:
+            if isinstance(tok, Builtin):
+                fn = STUBS.get(tok.name)
+                if fn is not None:
+                    args = Args([*tok.bound, *pos], star, {**dict(tok.bound_kw), **kws}, kwstar)
+                    out |= fn(self, args, site)
+                continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
                 continue
@@ -299,8 +307,16 @@ class Interp:
         return self.eval(e.value)
 
     def e_Attribute(self, e: ast.Attribute) -> Vals:
-        self.eval(e.value)
-        return EMPTY
+        v = self.eval(e.value)
+        if not isinstance(e.ctx, ast.Load):
+            return EMPTY
+        out: set[Builtin] = set()
+        for t in v:  # functools.partial, itertools.starmap, ...
+            if isinstance(t, Builtin) and t.name in STUB_MODULES and f"{t.name}.{e.attr}" in STUBS:
+                out.add(Builtin(f"{t.name}.{e.attr}"))
+        if e.attr in METHOD_STUBS:  # xs.sort(key=...): receiver bound as first argument
+            out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
+        return frozenset(out)
 
     def e_Yield(self, e: ast.Yield | ast.YieldFrom) -> Vals:
         self.ret |= self.eval(e.value)
@@ -395,6 +411,22 @@ class Interp:
         self.block(s.body)
 
     s_AsyncWith = s_With
+
+    def s_Import(self, s: ast.Import) -> None:
+        for a in s.names:  # only stub modules; project modules are not resolved here
+            if a.asname and a.name in STUB_MODULES:
+                self.bind(a.asname, frozenset([Builtin(a.name)]))
+            elif not a.asname and a.name.split(".")[0] in STUB_MODULES:
+                top = a.name.split(".")[0]
+                self.bind(top, frozenset([Builtin(top)]))
+
+    def s_ImportFrom(self, s: ast.ImportFrom) -> None:
+        if s.level or s.module not in STUB_MODULES:
+            return
+        for a in s.names:
+            full = f"{s.module}.{a.name}"
+            if full in STUBS:
+                self.bind(a.asname or a.name, frozenset([Builtin(full)]))
 
     def run(self) -> None:
         node = self.info.node

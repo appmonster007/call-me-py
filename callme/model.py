@@ -3,6 +3,7 @@
 Vocabulary:
   FuncId   identity of one function (def, lambda or the module body)
   Closure  a *token*: the abstract value "this function, created in that context"
+  Builtin  a *token* for a builtin / stdlib callable modelled by a stub (see stubs.py)
   Ctx      a *context*: the abstract entry state of a
            function (param -> set of closures) plus the captured defining node
   Node     (function, context): one analysed instance of a function
@@ -91,7 +92,47 @@ class Closure:
         return self._h
 
 
-ParamState = tuple[tuple[str, frozenset[Closure]], ...]
+@dataclass(frozen=True)
+class Builtin:
+    """Token: a builtin or stdlib callable (or stub module) modelled in stubs.py.
+
+    `bound` / `bound_kw` are pre-bound arguments prepended to every call: the
+    receiver of a builtin method (`list.sort`) or the arguments of a partial.
+    """
+
+    name: str
+    bound: tuple[frozenset[Token], ...] = ()
+    bound_kw: tuple[tuple[str, frozenset[Token]], ...] = ()
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        toks = [t for v in self.bound for t in v] + [t for _, v in self.bound_kw for t in v]
+        if toks:
+            object.__setattr__(self, "depth", 1 + max(t.depth for t in toks))
+        object.__setattr__(self, "_h", hash((self.name, self.bound, self.bound_kw)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+Token = Closure | Builtin
+
+
+def token_label(tok: Token, style: str = "full") -> str:
+    """Printable name of a token: the function id, or the builtin's name."""
+    if isinstance(tok, Builtin):
+        if tok.bound and tok.name.startswith("<partial"):
+            inner = ",".join(sorted(token_label(t, style) for t in tok.bound[0]))
+            return f"{tok.name[:-1]}:{inner}>"
+        return tok.name
+    return tok.func.render(style)
+
+
+Vals = frozenset[Token]  # abstract value: which callables an expression may be
+EMPTY: Vals = frozenset()
+ParamState = tuple[tuple[str, frozenset[Token]], ...]
 
 
 @dataclass(frozen=True)
