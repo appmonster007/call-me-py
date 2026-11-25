@@ -10,6 +10,7 @@ Vocabulary:
   BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
   ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
   StaticMethod a *token*: `staticmethod(func)` descriptor returning `func` unbound
+  Super        a *token*: `super(start, receiver)` proxy along `receiver`'s MRO
   Ctx          a *context*: the abstract entry state of a
                function (param -> set of tokens) plus the captured defining node
   Node         (function, context): one analysed instance of a function
@@ -217,7 +218,25 @@ class StaticMethod:
         return self._h
 
 
-Token = Closure | Builtin | ClassObj | Instance | BoundMethod | ClassMethod | StaticMethod
+@dataclass(frozen=True)
+class Super:
+    """Token: `super(start, receiver)` proxy searching `receiver`'s MRO after `start`."""
+
+    start: ClassId
+    receiver: ClassObj | Instance
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "depth", 1 + self.receiver.depth)
+        object.__setattr__(self, "_h", hash(("super", self.start, self.receiver)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+Token = Closure | Builtin | ClassObj | Instance | BoundMethod | ClassMethod | StaticMethod | Super
 
 
 def token_label(tok: Token, style: str = "full") -> str:
@@ -237,6 +256,8 @@ def token_label(tok: Token, style: str = "full") -> str:
         return f"classmethod({token_label(tok.func, style)})"
     if isinstance(tok, StaticMethod):
         return f"staticmethod({token_label(tok.func, style)})"
+    if isinstance(tok, Super):
+        return f"super({tok.start.render(style)}, {token_label(tok.receiver, style)})"
     return tok.func.render(style)
 
 

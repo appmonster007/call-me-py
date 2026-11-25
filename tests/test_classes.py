@@ -383,3 +383,169 @@ c.__init_subclass__()
         ("C.make", "leaf"),
         ("C.hook", "leaf"),
     }
+
+
+def test_inheritance_override_and_two_arg_super() -> None:
+    src = """
+class Base:
+    def run(self):
+        return self.step()
+
+    def step(self):
+        return 1
+
+    @classmethod
+    def build(cls):
+        return cls()
+
+class Left(Base):
+    def step(self):
+        return super().step()
+
+class Right(Base):
+    def step(self):
+        return super().step()
+
+class Diamond(Left, Right):
+    def step(self):
+        return super(Diamond, self).step()
+
+    @classmethod
+    def build(cls):
+        return super().build()
+
+Diamond.build().run()
+"""
+    assert edges(src) == {
+        ("<module>", "Diamond.build"),
+        ("<module>", "Base.run"),
+        ("Diamond.build", "Base.build"),
+        ("Base.run", "Diamond.step"),
+        ("Diamond.step", "Left.step"),
+        ("Left.step", "Right.step"),
+        ("Right.step", "Base.step"),
+    }
+
+
+def test_new_returning_other_class_and_object_new() -> None:
+    src = """
+class Target:
+    def __init__(self):
+        self.work()
+
+    def work(self):
+        return 1
+
+class Proxy:
+    def __new__(cls):
+        return Target()
+
+    def __init__(self):
+        self.never()
+
+    def never(self):
+        return 0
+
+class Explicit:
+    def __new__(cls):
+        return object.__new__(cls)
+
+    def __init__(self):
+        self.ok()
+
+    def ok(self):
+        return 2
+
+Proxy().work()
+Explicit()
+"""
+    assert edges(src) == {
+        ("<module>", "Proxy.__new__"),
+        ("<module>", "Target.work"),
+        ("Proxy.__new__", "Target.__init__"),
+        ("Target.__init__", "Target.work"),
+        ("<module>", "Explicit.__new__"),
+        ("<module>", "Explicit.__init__"),
+        ("Explicit.__init__", "Explicit.ok"),
+    }
+
+
+def test_dataclass_plain_parameterized_and_custom_init() -> None:
+    src = """
+from dataclasses import dataclass
+
+@dataclass
+class Plain:
+    x: int
+
+    def __post_init__(self):
+        self.check()
+
+    def check(self):
+        return 1
+
+@dataclass(frozen=True)
+class Frozen:
+    y: int
+
+    def __post_init__(self):
+        self.validate()
+
+    def validate(self):
+        return 2
+
+@dataclass
+class CustomInit:
+    z: int
+
+    def __init__(self, z):
+        self.setup()
+
+    def setup(self):
+        return 3
+
+    def __post_init__(self):
+        self.unused()
+
+    def unused(self):
+        return 4
+
+Plain(1)
+Frozen(2)
+CustomInit(3)
+"""
+    assert edges(src) == {
+        ("<module>", "Plain.__post_init__"),
+        ("Plain.__post_init__", "Plain.check"),
+        ("<module>", "Frozen.__post_init__"),
+        ("Frozen.__post_init__", "Frozen.validate"),
+        ("<module>", "CustomInit.__init__"),
+        ("CustomInit.__init__", "CustomInit.setup"),
+    }
+
+
+def test_class_decorator_called_and_returns_class() -> None:
+    src = """
+def mark():
+    return 1
+
+def deco(cls):
+    mark()
+    return cls
+
+@deco
+class Item:
+    def __init__(self):
+        self.go()
+
+    def go(self):
+        return 0
+
+Item()
+"""
+    assert edges(src) == {
+        ("<module>", "deco"),
+        ("deco", "mark"),
+        ("<module>", "Item.__init__"),
+        ("Item.__init__", "Item.go"),
+    }

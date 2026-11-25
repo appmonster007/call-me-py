@@ -30,8 +30,10 @@ from .model import (
     ParamState,
     Site,
     StaticMethod,
+    Super,
     Token,
     Vals,
+    token_label,
 )
 from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUBS, Args
 
@@ -53,6 +55,8 @@ class State:
     edges: set[Edge]
     entry: dict[Node, Env]  # entry states of widened contexts
     class_attrs: dict[ClassId, Env]  # class-level attribute table per class
+    bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
+    _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
     def __init__(self, max_ctx: int = 16) -> None:
@@ -64,6 +68,8 @@ class State:
         self.edges = set()
         self.entry = {}
         self.class_attrs = {}
+        self.bases = {}
+        self._mro_cache = {}
         self.changed = False
 
     def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
@@ -74,6 +80,68 @@ class State:
         if not vals <= old:
             attrs[name] = old | vals
             self.changed = True
+
+    def add_bases(self, cls: ClassId, new_bases: Sequence[ClassId]) -> None:
+        old = self.bases.get(cls, ())
+        merged = list(old)
+        for b in new_bases:
+            if b != cls and b not in merged:
+                merged.append(b)
+        tup = tuple(merged)
+        if tup != old:
+            self.bases[cls] = tup
+            self._mro_cache.clear()
+            self.changed = True
+
+    def mro(self, cls: ClassId) -> tuple[ClassId, ...]:
+        cached = self._mro_cache.get(cls)
+        if cached is not None:
+            return cached
+        res = self._compute_mro(cls, set())
+        self._mro_cache[cls] = res
+        return res
+
+    def _compute_mro(self, cls: ClassId, visiting: set[ClassId]) -> tuple[ClassId, ...]:
+        if cls in visiting:
+            return ()
+        bases = [b for b in self.bases.get(cls, ()) if b not in visiting]
+        if not bases:
+            return (cls,)
+        visiting.add(cls)
+        seqs = [list(self._compute_mro(b, visiting)) for b in bases]
+        visiting.remove(cls)
+        seqs.append(list(bases))
+        out: list[ClassId] = [cls]
+        while True:
+            seqs = [s for s in seqs if s]
+            if not seqs:
+                return tuple(out)
+            cand: ClassId | None = None
+            for s in seqs:
+                h = s[0]
+                if not any(h in other[1:] for other in seqs):
+                    cand = h
+                    break
+            if cand is None:  # inconsistent hierarchy: safe DFS fallback
+                cand = seqs[0][0]
+            if cand not in out:
+                out.append(cand)
+            for s in seqs:
+                if s and s[0] == cand:
+                    s.pop(0)
+
+    def lookup_class_attr(self, cls: ClassId, name: str, *, after: ClassId | None = None) -> Vals:
+        order = self.mro(cls)
+        if after is not None:
+            try:
+                order = order[order.index(after) + 1:]
+            except ValueError:
+                return EMPTY
+        for c in order:
+            vals = self.class_attrs.get(c, {}).get(name, EMPTY)
+            if vals:
+                return vals
+        return EMPTY
 
     def register(self, node: Node) -> None:
         group = self.by_func.setdefault(node.func, set())
@@ -123,7 +191,9 @@ def _bind_attr(tok: Token, owner_cls: ClassId, receiver: ClassObj | Instance) ->
         return BoundMethod(tok.func, ClassObj(owner_cls))
     if isinstance(tok, StaticMethod):
         return tok.func
-    if isinstance(tok, Closure) and isinstance(receiver, Instance):
+    if isinstance(receiver, Instance) and (
+        isinstance(tok, Closure) or (isinstance(tok, Builtin) and tok.name == "<dataclass_init>")
+    ):
         return BoundMethod(tok, receiver)
     return tok
 
@@ -268,17 +338,24 @@ class Interp:
                                   star, kws, kwstar, site)
                 continue
             if isinstance(tok, ClassObj):
-                inst = Instance(tok.cls)
-                init = self.state.class_attrs.get(tok.cls, {}).get("__init__", EMPTY)
-                if init:
-                    bound_init = frozenset(_bind_attr(t, tok.cls, inst) for t in init)
-                    self.apply(bound_init, pos, star, kws, kwstar, site)
-                out |= frozenset([inst])
+                new_fn = self.state.lookup_class_attr(tok.cls, "__new__")
+                if new_fn:
+                    bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
+                    created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
+                else:
+                    created = frozenset([Instance(tok.cls)])
+                for obj in created:
+                    if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
+                        init = self.state.lookup_class_attr(obj.cls, "__init__")
+                        if init:
+                            bound_init = frozenset(_bind_attr(t, obj.cls, obj) for t in init)
+                            self.apply(bound_init, pos, star, kws, kwstar, site)
+                out |= created
                 continue
             if isinstance(tok, StaticMethod):
                 out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
                 continue
-            if isinstance(tok, (Instance, ClassMethod)):
+            if isinstance(tok, (Instance, ClassMethod, Super)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -380,11 +457,18 @@ class Interp:
             return EMPTY
         out: set[Token] = set()
         for t in v:
-            if isinstance(t, Builtin) and t.name in STUB_MODULES and f"{t.name}.{e.attr}" in STUBS:
+            if isinstance(t, Builtin) and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
             elif isinstance(t, (ClassObj, Instance)):
-                for attr_tok in self.state.class_attrs.get(t.cls, {}).get(e.attr, EMPTY):
+                for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
                     out.add(_bind_attr(attr_tok, t.cls, t))
+            elif isinstance(t, Super):
+                found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
+                if found:
+                    for attr_tok in found:
+                        out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
+                elif e.attr == "__new__":
+                    out.add(Builtin("object.__new__"))
         if e.attr in METHOD_STUBS:  # xs.sort(key=...): receiver bound as first argument
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
@@ -449,12 +533,25 @@ class Interp:
 
     def s_ClassDef(self, s: ast.ClassDef) -> None:
         cid = self.prog.class_by_node[id(s)]
-        for x in [*s.decorator_list, *s.bases, *[k.value for k in s.keywords]]:
-            self.eval(x)
+        decs = [self.eval(dec) for dec in s.decorator_list]
+        base_ids: list[ClassId] = []
+        for b in s.bases:
+            for t in sorted(self.eval(b), key=token_label):
+                if isinstance(t, ClassObj):
+                    base_ids.append(t.cls)
+        for k in s.keywords:
+            self.eval(k.value)
+        if not self.readonly and base_ids:
+            self.state.add_bases(cid, base_ids)
         self.class_stack.append((cid, {}))
         self.block(s.body)
         self.class_stack.pop()
-        self.bind(s.name, frozenset([ClassObj(cid)]))
+        vals: Vals = frozenset([ClassObj(cid)])
+        for dec, callee in reversed(list(zip(s.decorator_list, decs))):
+            res = self.apply(callee, [vals], None, {}, None,
+                             make_site(self.info.id, dec, "decorator"))
+            vals = res if callee else vals  # unresolved decorator: assume identity
+        self.bind(s.name, vals)
 
     def s_Assign(self, s: ast.Assign) -> None:
         v = self.eval(s.value)

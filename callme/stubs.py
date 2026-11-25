@@ -20,12 +20,23 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .model import EMPTY, Builtin, ClassMethod, Site, StaticMethod, Vals
+from .model import (
+    EMPTY,
+    BoundMethod,
+    Builtin,
+    ClassMethod,
+    ClassObj,
+    Instance,
+    Site,
+    StaticMethod,
+    Super,
+    Vals,
+)
 
 if TYPE_CHECKING:
     from .transfer import Interp
 
-STUB_MODULES = frozenset({"functools", "itertools"})
+STUB_MODULES = frozenset({"dataclasses", "functools", "itertools"})
 METHOD_STUBS = {"sort": "list.sort"}  # attribute name -> stub (receiver is bound first)
 MAX_PARTIAL_ARGS = 4  # bound arguments before a partial is widened to <partial*>
 MAX_PARTIAL_DEPTH = 3  # nesting of tokens inside a partial's arguments
@@ -143,6 +154,66 @@ def _staticmethod(it: Interp, a: Args, site: Site) -> Vals:
         t if isinstance(t, StaticMethod) else StaticMethod(t)
         for t in a.get(0) if isinstance(t, StaticMethod) or t.depth <= MAX_PARTIAL_DEPTH
     )
+
+
+@stub("super")
+def _super(it: Interp, a: Args, site: Site) -> Vals:
+    if not a.pos:  # 0-arg super(): enclosing class + first positional param (self / cls)
+        owner = it.info.owner
+        if owner is None or not it.info.sig.pos:
+            return EMPTY
+        recv = it.lookup(it.info.sig.pos[0])
+        return frozenset(Super(owner, r) for r in recv if isinstance(r, (ClassObj, Instance)))
+    starts = [t.cls for t in a.get(0) if isinstance(t, ClassObj)]
+    recvs = [r for r in a.get(1) if isinstance(r, (ClassObj, Instance))]
+    return frozenset(Super(s, r) for s in starts for r in recvs)
+
+
+@stub("object")
+def _object(it: Interp, a: Args, site: Site) -> Vals:
+    return EMPTY
+
+
+@stub("object.__new__")
+def _object_new(it: Interp, a: Args, site: Site) -> Vals:
+    return frozenset(Instance(t.cls) for t in a.get(0) if isinstance(t, ClassObj))
+
+
+def _apply_dataclass(it: Interp, cls_vals: Vals) -> Vals:
+    for t in cls_vals:
+        if isinstance(t, ClassObj) and not it.readonly:
+            if "__init__" not in it.state.class_attrs.get(t.cls, {}):
+                it.state.add_class_attr(t.cls, "__init__", frozenset([Builtin("<dataclass_init>")]))
+    return cls_vals
+
+
+@stub("dataclasses.dataclass")
+def _dataclass(it: Interp, a: Args, site: Site) -> Vals:
+    cls = a.pos[0] if a.pos else EMPTY
+    if any(isinstance(t, ClassObj) for t in cls):
+        return _apply_dataclass(it, cls)
+    return frozenset([Builtin("<dataclass>")])
+
+
+@stub("<dataclass>")
+def _dataclass_deco(it: Interp, a: Args, site: Site) -> Vals:
+    return _apply_dataclass(it, a.get(0))
+
+
+@stub("<dataclass_init>")
+def _dataclass_init(it: Interp, a: Args, site: Site) -> Vals:
+    for obj in a.get(0):
+        if isinstance(obj, Instance):
+            post = it.state.lookup_class_attr(obj.cls, "__post_init__")
+            if post:
+                bound = frozenset(
+                    BoundMethod(t.func, ClassObj(obj.cls)) if isinstance(t, ClassMethod)
+                    else t.func if isinstance(t, StaticMethod)
+                    else BoundMethod(t, obj)
+                    for t in post
+                )
+                it.apply(bound, [], None, {}, None, site)
+    return EMPTY
 
 
 @stub("list", "tuple", "set", "frozenset", "dict", "iter", "next", "reversed",
