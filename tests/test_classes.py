@@ -549,3 +549,138 @@ Item()
         ("<module>", "Item.__init__"),
         ("Item.__init__", "Item.go"),
     }
+
+
+def test_instance_and_class_attribute_assignments() -> None:
+    src = """
+def f(x):
+    return x
+
+def g(x):
+    return x
+
+def patched(self):
+    return g(1)
+
+class Base:
+    def __init__(self, cb):
+        self.cb = cb
+
+    def run(self):
+        return self.cb(0)
+
+class SubA(Base):
+    pass
+
+class SubB(Base):
+    pass
+
+a = SubA(f)
+a.run()
+b = SubB(g)
+b.run()
+SubA.extra = patched
+a.extra()
+"""
+    assert edges(src) == {
+        ("<module>", "Base.__init__"),
+        ("<module>", "Base.run"),
+        ("<module>", "patched"),
+        ("Base.run", "f"),
+        ("Base.run", "g"),
+        ("patched", "g"),
+    }
+
+
+def test_mutating_container_fields_and_user_append_get() -> None:
+    src = """
+def cb1():
+    return 1
+
+def cb2():
+    return 2
+
+def cb3():
+    return 3
+
+class Bus:
+    def __init__(self):
+        self.hooks = []
+        self.table = {}
+
+    def register(self, h, k):
+        self.hooks.append(h)
+        self.table[k] = h
+
+    def fire(self):
+        for h in self.hooks:
+            h()
+        self.table.get("missing", cb3)()
+
+    def tick(self):
+        return 0
+
+class CustomStore:
+    def append(self, x):
+        return cb1()
+
+    def get(self, k, default=None):
+        return cb2
+
+bus = Bus()
+bus.register(cb1, "a")
+bus.register(bus.tick, "b")
+bus.fire()
+
+store = CustomStore()
+store.append(cb3)
+store.get("k", cb3)()
+"""
+    assert edges(src) == {
+        ("<module>", "Bus.__init__"),
+        ("<module>", "Bus.register"),
+        ("<module>", "Bus.fire"),
+        ("Bus.fire", "cb1"),
+        ("Bus.fire", "cb3"),
+        ("Bus.fire", "Bus.tick"),
+        ("<module>", "CustomStore.append"),
+        ("<module>", "CustomStore.get"),
+        ("<module>", "cb2"),
+        ("CustomStore.append", "cb1"),
+    }
+
+
+def test_callable_instances_and_hofs() -> None:
+    src = """
+import functools
+
+def target(x):
+    return x
+
+class Wrapper:
+    def __init__(self, fn):
+        self.fn = fn
+
+    def __call__(self, x):
+        return self.fn(x)
+
+class Key:
+    def __call__(self, x):
+        return target(x)
+
+@Wrapper
+def wrapped(x):
+    return x
+
+wrapped(1)
+sorted([2, 1], key=Key())
+functools.partial(Wrapper(target), 1)()
+"""
+    assert edges(src) == {
+        ("<module>", "Wrapper.__init__"),
+        ("<module>", "Wrapper.__call__"),
+        ("<module>", "Key.__call__"),
+        ("Wrapper.__call__", "wrapped"),
+        ("Wrapper.__call__", "target"),
+        ("Key.__call__", "target"),
+    }

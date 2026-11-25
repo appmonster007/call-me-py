@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from .transfer import Interp
 
 STUB_MODULES = frozenset({"dataclasses", "functools", "itertools"})
-METHOD_STUBS = {"sort": "list.sort"}  # attribute name -> stub (receiver is bound first)
+METHOD_STUBS = {"sort": "list.sort", "get": "dict.get"}  # attribute name -> stub (receiver is bound first)
 MAX_PARTIAL_ARGS = 4  # bound arguments before a partial is widened to <partial*>
 MAX_PARTIAL_DEPTH = 3  # nesting of tokens inside a partial's arguments
 
@@ -138,6 +138,11 @@ def _minmax(it: Interp, a: Args, site: Site) -> Vals:
 def _list_sort(it: Interp, a: Args, site: Site) -> Vals:
     call(it, a.kw("key"), [a.get(0)], site)  # a.pos[0] is the bound receiver
     return EMPTY
+
+
+@stub("dict.get")
+def _dict_get(it: Interp, a: Args, site: Site) -> Vals:
+    return a.get(0) | a.get(2, "default")
 
 
 @stub("classmethod")

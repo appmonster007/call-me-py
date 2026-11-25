@@ -55,6 +55,7 @@ class State:
     edges: set[Edge]
     entry: dict[Node, Env]  # entry states of widened contexts
     class_attrs: dict[ClassId, Env]  # class-level attribute table per class
+    inst_attrs: dict[ClassId, Env]  # instance-level attribute table per class
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
@@ -68,6 +69,7 @@ class State:
         self.edges = set()
         self.entry = {}
         self.class_attrs = {}
+        self.inst_attrs = {}
         self.bases = {}
         self._mro_cache = {}
         self.changed = False
@@ -76,6 +78,15 @@ class State:
         if not vals:
             return
         attrs = self.class_attrs.setdefault(cls, {})
+        old = attrs.get(name, EMPTY)
+        if not vals <= old:
+            attrs[name] = old | vals
+            self.changed = True
+
+    def add_inst_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
+        if not vals:
+            return
+        attrs = self.inst_attrs.setdefault(cls, {})
         old = attrs.get(name, EMPTY)
         if not vals <= old:
             attrs[name] = old | vals
@@ -256,9 +267,26 @@ class Interp:
             return frozenset([Builtin(name)])
         return EMPTY  # unresolved
 
+    def set_attr(self, objs: Vals, attr: str, vals: Vals) -> None:
+        if not vals or self.readonly:
+            return
+        for t in objs:
+            if isinstance(t, Instance):
+                self.state.add_inst_attr(t.cls, attr, vals)
+            elif isinstance(t, ClassObj):
+                self.state.add_class_attr(t.cls, attr, vals)
+
     def assign(self, t: ast.expr, vals: Vals) -> None:
         if isinstance(t, ast.Name):
             self.bind(t.id, vals)
+        elif isinstance(t, ast.Attribute):
+            self.set_attr(self.eval(t.value), t.attr, vals)
+        elif isinstance(t, ast.Subscript):
+            self.eval(t.slice)
+            if isinstance(t.value, (ast.Name, ast.Attribute, ast.Subscript)):
+                self.assign(t.value, vals)
+            else:
+                self.eval(t.value)
         elif isinstance(t, (ast.Tuple, ast.List)):
             for x in t.elts:
                 self.assign(x, vals)
@@ -355,7 +383,13 @@ class Interp:
             if isinstance(tok, StaticMethod):
                 out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
                 continue
-            if isinstance(tok, (Instance, ClassMethod, Super)):
+            if isinstance(tok, Instance):
+                call_fn = self.state.lookup_class_attr(tok.cls, "__call__")
+                if call_fn:
+                    bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
+                    out |= self.apply(bound_call, pos, star, kws, kwstar, site)
+                continue
+            if isinstance(tok, (ClassMethod, Super)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -407,7 +441,36 @@ class Interp:
                 kwstar = (kwstar or EMPTY) | v
             else:
                 kws[k.arg] = kws.get(k.arg, EMPTY) | v
-        return self.apply(callee, pos, star, kws, kwstar, make_site(self.info.id, e))
+        out = self.apply(callee, pos, star, kws, kwstar, make_site(self.info.id, e))
+        if not callee and isinstance(e.func, ast.Attribute) and isinstance(
+            e.func.value, (ast.Name, ast.Attribute, ast.Subscript)
+        ):
+            out |= self._mutate_container(e.func.value, e.func.attr, pos, star, kws, kwstar)
+        return out
+
+    def _mutate_container(self, target: ast.expr, method: str, pos: Sequence[Vals],
+                          star: Vals | None, kws: Mapping[str, Vals],
+                          kwstar: Vals | None) -> Vals:
+        """Propagate values inserted into list/set/dict containers (e.g. self.hooks.append(h))."""
+        added = EMPTY
+        if method in ("append", "add", "extend"):
+            added = (pos[0] if pos else EMPTY) | (star or EMPTY)
+        elif method == "insert":
+            added = (pos[1] if len(pos) > 1 else EMPTY) | (star or EMPTY)
+        elif method == "setdefault":
+            added = ((pos[1] if len(pos) > 1 else EMPTY)
+                     | kws.get("default", EMPTY) | (star or EMPTY) | (kwstar or EMPTY))
+            self.assign(target, added)
+            return self.eval(target) | added
+        elif method == "update":
+            added = (pos[0] if pos else EMPTY) | (star or EMPTY) | (kwstar or EMPTY)
+            for v in kws.values():
+                added |= v
+        else:
+            return EMPTY
+        if added:
+            self.assign(target, added)
+        return EMPTY
 
     def e_IfExp(self, e: ast.IfExp) -> Vals:
         self.eval(e.test)
@@ -459,7 +522,11 @@ class Interp:
         for t in v:
             if isinstance(t, Builtin) and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
-            elif isinstance(t, (ClassObj, Instance)):
+            elif isinstance(t, ClassObj):
+                for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
+                    out.add(_bind_attr(attr_tok, t.cls, t))
+            elif isinstance(t, Instance):
+                out.update(self.state.inst_attrs.get(t.cls, {}).get(e.attr, EMPTY))
                 for attr_tok in self.state.lookup_class_attr(t.cls, e.attr):
                     out.add(_bind_attr(attr_tok, t.cls, t))
             elif isinstance(t, Super):
@@ -469,7 +536,7 @@ class Interp:
                         out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
                 elif e.attr == "__new__":
                     out.add(Builtin("object.__new__"))
-        if e.attr in METHOD_STUBS:  # xs.sort(key=...): receiver bound as first argument
+        if e.attr in METHOD_STUBS and not out:  # xs.sort(key=...), d.get(k, default)
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
 
