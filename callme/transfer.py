@@ -14,7 +14,23 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import final
 
 from .extract import FuncInfo, Program, make_site
-from .model import EMPTY, Builtin, Closure, Ctx, Edge, FuncId, Node, ParamState, Site, Vals
+from .model import (
+    EMPTY,
+    BoundMethod,
+    Builtin,
+    ClassId,
+    ClassObj,
+    Closure,
+    Ctx,
+    Edge,
+    FuncId,
+    Instance,
+    Node,
+    ParamState,
+    Site,
+    Token,
+    Vals,
+)
 from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUBS, Args
 
 Env = dict[str, Vals]
@@ -34,6 +50,7 @@ class State:
     ret: dict[Node, Vals]  # return value per node
     edges: set[Edge]
     entry: dict[Node, Env]  # entry states of widened contexts
+    class_attrs: dict[ClassId, Env]  # class-level attribute table per class
     changed: bool
 
     def __init__(self, max_ctx: int = 16) -> None:
@@ -44,7 +61,17 @@ class State:
         self.ret = {}
         self.edges = set()
         self.entry = {}
+        self.class_attrs = {}
         self.changed = False
+
+    def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
+        if not vals:
+            return
+        attrs = self.class_attrs.setdefault(cls, {})
+        old = attrs.get(name, EMPTY)
+        if not vals <= old:
+            attrs[name] = old | vals
+            self.changed = True
 
     def register(self, node: Node) -> None:
         group = self.by_func.setdefault(node.func, set())
@@ -98,7 +125,7 @@ class Interp:
     env: Env
     ret: Vals
     calls: Calls
-    in_class: int
+    class_stack: list[tuple[ClassId, Env]]
 
     def __init__(self, prog: Program, state: State, node: Node | None, *,
                  readonly: bool = False, func: FuncId | None = None) -> None:
@@ -109,14 +136,21 @@ class Interp:
         self.env = {}
         self.ret = EMPTY
         self.calls = []
-        self.in_class = 0
+        self.class_stack = []
 
     # ------------------------------------------------------------ names
     def bind(self, name: str, vals: Vals) -> None:
-        if vals and self.in_class == 0 and name in self.info.locals:
+        if self.class_stack:
+            cid, ns = self.class_stack[-1]
+            ns[name] = ns.get(name, EMPTY) | vals
+            if not self.readonly:
+                self.state.add_class_attr(cid, name, vals)
+        elif vals and name in self.info.locals:
             self.env[name] = self.env.get(name, EMPTY) | vals
 
     def lookup(self, name: str) -> Vals:
+        if self.class_stack and name in self.class_stack[-1][1]:
+            return self.class_stack[-1][1][name]
         if name in self.info.locals:
             if self.node is not None:
                 return self.env.get(name, EMPTY)
@@ -211,6 +245,19 @@ class Interp:
                 if fn is not None:
                     args = Args([*tok.bound, *pos], star, {**dict(tok.bound_kw), **kws}, kwstar)
                     out |= fn(self, args, site)
+                continue
+            if isinstance(tok, BoundMethod):
+                out |= self.apply(frozenset([tok.func]), [frozenset([tok.receiver]), *pos],
+                                  star, kws, kwstar, site)
+                continue
+            if isinstance(tok, ClassObj):
+                inst = Instance(tok.cls)
+                init = self.state.class_attrs.get(tok.cls, {}).get("__init__", EMPTY)
+                if init:
+                    self.apply(init, [frozenset([inst]), *pos], star, kws, kwstar, site)
+                out |= frozenset([inst])
+                continue
+            if isinstance(tok, Instance):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -310,10 +357,18 @@ class Interp:
         v = self.eval(e.value)
         if not isinstance(e.ctx, ast.Load):
             return EMPTY
-        out: set[Builtin] = set()
-        for t in v:  # functools.partial, itertools.starmap, ...
+        out: set[Token] = set()
+        for t in v:
             if isinstance(t, Builtin) and t.name in STUB_MODULES and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
+            elif isinstance(t, ClassObj):
+                out.update(self.state.class_attrs.get(t.cls, {}).get(e.attr, EMPTY))
+            elif isinstance(t, Instance):
+                for attr_tok in self.state.class_attrs.get(t.cls, {}).get(e.attr, EMPTY):
+                    if isinstance(attr_tok, Closure):
+                        out.add(BoundMethod(attr_tok, t))
+                    else:
+                        out.add(attr_tok)
         if e.attr in METHOD_STUBS:  # xs.sort(key=...): receiver bound as first argument
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
@@ -357,7 +412,9 @@ class Interp:
             elif isinstance(c, ast.stmt):
                 self.block([c])
             elif isinstance(c, ast.ExceptHandler):
-                self.eval(c.type)
+                exc = self.eval(c.type)
+                if c.name:
+                    self.bind(c.name, frozenset(Instance(t.cls) for t in exc if isinstance(t, ClassObj)))
                 self.block(c.body)
 
     def s_FunctionDef(self, s: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
@@ -375,11 +432,13 @@ class Interp:
     s_AsyncFunctionDef = s_FunctionDef
 
     def s_ClassDef(self, s: ast.ClassDef) -> None:
+        cid = self.prog.class_by_node[id(s)]
         for x in [*s.decorator_list, *s.bases, *[k.value for k in s.keywords]]:
             self.eval(x)
-        self.in_class += 1
+        self.class_stack.append((cid, {}))
         self.block(s.body)
-        self.in_class -= 1
+        self.class_stack.pop()
+        self.bind(s.name, frozenset([ClassObj(cid)]))
 
     def s_Assign(self, s: ast.Assign) -> None:
         v = self.eval(s.value)

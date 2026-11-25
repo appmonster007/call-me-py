@@ -1,13 +1,17 @@
 """Core data types shared by every stage of the analysis.
 
 Vocabulary:
-  FuncId   identity of one function (def, lambda or the module body)
-  Closure  a *token*: the abstract value "this function, created in that context"
-  Builtin  a *token* for a builtin / stdlib callable modelled by a stub (see stubs.py)
-  Ctx      a *context*: the abstract entry state of a
-           function (param -> set of closures) plus the captured defining node
-  Node     (function, context): one analysed instance of a function
-  Edge     call edge between two nodes at a syntactic call site
+  FuncId       identity of one function (def, lambda or the module body)
+  ClassId      identity of one class definition
+  Closure      a *token*: the abstract value "this function, created in that context"
+  Builtin      a *token* for a builtin / stdlib callable modelled by a stub (see stubs.py)
+  ClassObj     a *token* representing a class object
+  Instance     a *token* representing an abstract instance of a class
+  BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
+  Ctx          a *context*: the abstract entry state of a
+               function (param -> set of tokens) plus the captured defining node
+  Node         (function, context): one analysed instance of a function
+  Edge         call edge between two nodes at a syntactic call site
 """
 from __future__ import annotations
 
@@ -17,11 +21,11 @@ from typing import override
 
 
 @dataclass(frozen=True)
-class FuncId:
-    """Identity of one function, stored as separate parts; strings are built on demand.
+class _SymId:
+    """Shared identity layout for functions and classes; strings are built on demand.
 
     file      source path as given (e.g. "pkg/util.py")
-    qualname  dotted scope path of the function (e.g. "Outer.make.inner")
+    qualname  dotted scope path of the definition (e.g. "Outer.make.inner")
     lineno    1-based line of the definition
     col       0-based column of the definition
     """
@@ -72,6 +76,16 @@ class FuncId:
 
 
 @dataclass(frozen=True)
+class FuncId(_SymId):
+    """Identity of one function (def, async def, lambda or module body)."""
+
+
+@dataclass(frozen=True)
+class ClassId(_SymId):
+    """Identity of one class definition."""
+
+
+@dataclass(frozen=True)
 class Closure:
     """Token: function `func` created while `parent` was running.
 
@@ -117,16 +131,72 @@ class Builtin:
         return self._h
 
 
-Token = Closure | Builtin
+@dataclass(frozen=True)
+class ClassObj:
+    """Token: a class object."""
+
+    cls: ClassId
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash(("class", self.cls)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+@dataclass(frozen=True)
+class Instance:
+    """Token: an abstract instance of `cls`."""
+
+    cls: ClassId
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash(("inst", self.cls)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+@dataclass(frozen=True)
+class BoundMethod:
+    """Token: callable `func` with `receiver` pre-bound as first argument."""
+
+    func: Token
+    receiver: ClassObj | Instance
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "depth", 1 + max(self.func.depth, self.receiver.depth))
+        object.__setattr__(self, "_h", hash(("bound", self.func, self.receiver)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
+Token = Closure | Builtin | ClassObj | Instance | BoundMethod
 
 
 def token_label(tok: Token, style: str = "full") -> str:
-    """Printable name of a token: the function id, or the builtin's name."""
+    """Printable name of a token."""
     if isinstance(tok, Builtin):
         if tok.bound and tok.name.startswith("<partial"):
             inner = ",".join(sorted(token_label(t, style) for t in tok.bound[0]))
             return f"{tok.name[:-1]}:{inner}>"
         return tok.name
+    if isinstance(tok, ClassObj):
+        return f"<class {tok.cls.render(style)}>"
+    if isinstance(tok, Instance):
+        return f"{tok.cls.render(style)}()"
+    if isinstance(tok, BoundMethod):
+        return f"{token_label(tok.func, style)}@{token_label(tok.receiver, style)}"
     return tok.func.render(style)
 
 
