@@ -12,7 +12,7 @@ from __future__ import annotations
 import ast
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
-from .extract import Program, make_site
+from .extract import Program, make_site, pattern_names
 from .model import Closure, Ctx, Node, ParamState, Site
 
 EMPTY: FrozenSet[Closure] = frozenset()
@@ -344,11 +344,27 @@ class Interp:
     s_AsyncFunctionDef = s_FunctionDef
 
     def s_ClassDef(self, s):
-        for x in [*s.decorator_list, *s.bases, *[k.value for k in s.keywords]]:
+        decos = [self.eval(d) for d in s.decorator_list]
+        for x in [*s.bases, *[k.value for k in s.keywords]]:
             self.eval(x)
         self.in_class += 1
         self.block(s.body)
         self.in_class -= 1
+        for dec, callee in reversed(list(zip(s.decorator_list, decos))):
+            # classes are not tracked as values: the decorator receives EMPTY
+            self.apply(callee, [EMPTY], None, {}, None,
+                       make_site(self.info.id, dec, "decorator"))
+
+    def s_Match(self, s):
+        subject = self.eval(s.subject)
+        for case in s.cases:
+            for n in ast.walk(case.pattern):
+                if isinstance(n, ast.expr):  # value patterns, class names
+                    self.eval(n)
+                for name in pattern_names(n):
+                    self.bind(name, subject)  # captures: some part of the subject
+            self.eval(case.guard)
+            self.block(case.body)
 
     def s_Assign(self, s):
         v = self.eval(s.value)

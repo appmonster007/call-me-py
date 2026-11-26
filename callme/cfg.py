@@ -33,7 +33,6 @@ from .model import (AFTER_CALL, BRANCH, CALL, CALL_TO_RETURN, CFG, CFGEdge, CFGN
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
 TRY_NODES = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t)
-MATCH = getattr(ast, "Match", None)
 
 Frontier = List[Tuple[int, str]]  # dangling (source point, edge kind) pairs
 
@@ -204,7 +203,7 @@ class Builder:
         m = getattr(self, "s_" + type(s).__name__, None)
         if m is not None:
             m(s)
-        elif TRY_NODES and isinstance(s, TRY_NODES):
+        elif isinstance(s, TRY_NODES):
             self.s_Try(s)
         else:  # simple statement: its expressions, then its effect
             for c in ast.iter_child_nodes(s):

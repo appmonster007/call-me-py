@@ -93,6 +93,13 @@ def make_sig(args: ast.arguments) -> Sig:
     )
 
 
+def pattern_names(n: ast.AST) -> Tuple[str, ...]:
+    """Names captured by one `match` pattern node (MatchAs / MatchStar / MatchMapping)."""
+    field = {"MatchAs": "name", "MatchStar": "name", "MatchMapping": "rest"}.get(type(n).__name__)
+    name = getattr(n, field, None) if field else None
+    return (name,) if name else ()
+
+
 def scope_locals(body, params) -> frozenset:
     names = set(params)
     declared = set()
@@ -109,6 +116,7 @@ def scope_locals(body, params) -> frozenset:
             names.add(n.name)
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             declared.update(n.names)
+        names.update(pattern_names(n))
     return frozenset(names - declared)
 
 
@@ -179,12 +187,6 @@ def make_site(caller: FuncId, node: ast.AST, kind: str = "call") -> Site:
 
 
 def call_sites(prog: Program, fid: FuncId) -> Tuple[Site, ...]:
-    """Syntactic call sites (and decorator applications) executed by `fid`."""
-    out = set()
-    for n in walk_scope(prog.funcs[fid].body):
-        if isinstance(n, ast.Call):
-            out.add(make_site(fid, n, "call"))
-        elif isinstance(n, FUNC_NODES + (ast.ClassDef,)):
-            for d in n.decorator_list:
-                out.add(make_site(fid, d, "decorator"))
-    return tuple(sorted(out, key=lambda s: (s.line, s.col, s.kind)))
+    """Call sites (and decorator applications) executed by `fid`, including those
+    in class bodies; taken from the CFG so both always agree."""
+    return tuple(sorted(prog.cfgs[fid].calls, key=lambda s: (s.line, s.col, s.kind)))

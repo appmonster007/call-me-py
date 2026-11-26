@@ -1,5 +1,6 @@
 """CFG builder and ICFG construction."""
 import json
+import sys
 import textwrap
 from pathlib import Path
 
@@ -178,3 +179,53 @@ def test_icfg_exports():
     assert sorted(e["kind"] for e in d["edges"]) == ["call", "return"]
     dot = to_icfg_dot(cg)
     assert dot.startswith("digraph icfg") and "cluster_1" in dot
+
+
+# ------------------------------------------------------------ analysis and CFG agree
+def edges_of(src):
+    cg = analyze_source(textwrap.dedent(src), "t.py", id_style="short")
+    return cg, cg.function_edges()
+
+
+@pytest.mark.parametrize("path", CASES, ids=lambda p: p.stem)
+def test_every_edge_site_is_a_listed_site(path):
+    for unreachable in (False, True):
+        cg = analyze_file(path, include_unreachable=unreachable)
+        assert {e.site for e in cg.edges} <= set(cg.sites)
+
+
+def test_class_body_calls_are_sites():
+    cg, edges = edges_of("""
+        def f(): pass
+        class C:
+            x = f()
+    """)
+    assert ("<module>", "f") in edges
+    assert any(s.text == "f()" for s in cg.sites)
+
+
+def test_class_decorator_is_applied():
+    _, edges = edges_of("""
+        def deco(cls): return cls
+        @deco
+        class C: pass
+    """)
+    assert ("<module>", "deco") in edges
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="match needs Python 3.10+")
+def test_match_case_bodies_are_analysed():
+    cg, edges = edges_of("""
+        def a(): pass
+        def b(): pass
+        def run(cmd, f):
+            match cmd:
+                case "a" if a():
+                    f()
+                case [g, *_]:
+                    g()
+        run("a", b)
+    """)
+    assert {("run", "a"), ("run", "b")} <= edges
+    c = cg.prog.cfgs[next(f for f in cg.prog.funcs if f.qualname == "run")]
+    assert sum(n.kind == BRANCH for n in c.nodes) >= 3  # two cases + one guard
