@@ -18,6 +18,7 @@ from typing import Dict, Iterator, List, Tuple
 
 from .extract import Program
 from .model import CALL_EDGE, CFG, RETURN_EDGE, Edge, IEdge, Node
+from .transfer import State
 
 Point = Tuple[Node, int]
 
@@ -79,6 +80,11 @@ class ICFG:
             adj = (out, inc)
             object.__setattr__(self, "_adj_cache", adj)
         return adj
+
+
+def icfg_from_state(prog: Program, state: State) -> ICFG:
+    """ICFG of a call graph solver state (what a later pass in a pipeline reads)."""
+    return build_icfg(prog, state.order, state.edges)
 
 
 def build_icfg(prog: Program, nodes, calls) -> ICFG:

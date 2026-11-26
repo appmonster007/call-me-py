@@ -24,9 +24,9 @@ Env = Dict[str, FrozenSet[Closure]]
 class State:
     """Global fixpoint state: contexts, local envs, return values, call edges."""
 
-    def __init__(self, max_ctx: int = 16, module=None) -> None:
+    def __init__(self, max_ctx: int = 16, program: Optional[str] = None) -> None:
         self.max_ctx = max_ctx
-        self.module = module  # FuncId of the program this state belongs to
+        self.program = program  # Program.fingerprint of the source this state describes
         self.order: List[Node] = []
         self.by_func: Dict = {}
         self.envs: Dict[Node, Env] = {}
@@ -37,7 +37,7 @@ class State:
 
     def copy(self) -> "State":
         """Independent copy (values are immutable, containers are not)."""
-        new = State(self.max_ctx, self.module)
+        new = State(self.max_ctx, self.program)
         new.order = list(self.order)
         new.by_func = {f: set(g) for f, g in self.by_func.items()}
         new.envs = {n: dict(e) for n, e in self.envs.items()}
@@ -408,8 +408,14 @@ def analyze(node: Node, state: State, prog: Program, env: Optional[Env] = None):
     """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)]).
 
     The local fixpoint starts from the entry state joined with `env` (default: the
-    env already stored for `node` in `state`), so the returned env can be passed
-    straight back in: analyze(n, s, p, analyze(n, s, p)[0]) is stable.
+    env already stored for `node` in `state`). The returned env can be passed back
+    in: with the same `state`, analyze(n, s, p, analyze(n, s, p)[0]) returns the
+    same result.
+
+    Side effect: callee contexts reached for the first time are registered in
+    `state` (State.resolve), and widened contexts may grow their entry state.
+    Env, return values and edges are NOT written back; `solver.step` joins them.
+    Pass `state.copy()` to keep a state untouched.
     """
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)

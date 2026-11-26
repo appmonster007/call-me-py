@@ -6,6 +6,7 @@ Builds a `Program`: every function (def, async def, lambda, module body) gets a
 from __future__ import annotations
 
 import ast
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -47,6 +48,7 @@ class Program:
     funcs: Dict[FuncId, FuncInfo]
     by_node: Dict[int, FuncId]
     cfgs: Dict[FuncId, CFG] = field(default_factory=dict)  # one per function
+    fingerprint: str = ""  # hash of file name + source; identifies this program version
 
     def nesting_edges(self) -> List[Tuple[FuncId, FuncId]]:
         """The function-identifier graph: (lexical parent, child)."""
@@ -168,7 +170,12 @@ def build_program(source: str, filename: str = "<string>") -> Program:
     for s in tree.body:
         walk(s, "", mod)
     cfgs = {fid: build_cfg(info, make_site) for fid, info in funcs.items()}
-    return Program(filename, tree, mod, funcs, by_node, cfgs)
+    return Program(filename, tree, mod, funcs, by_node, cfgs, fingerprint(source, filename))
+
+
+def fingerprint(source: str, filename: str) -> str:
+    """Two parses get the same fingerprint iff file name and source are equal."""
+    return hashlib.sha256(f"{filename}\0{source}".encode()).hexdigest()
 
 
 def parse_file(path) -> Program:

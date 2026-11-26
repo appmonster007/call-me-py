@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, Tuple
+from typing import Dict, FrozenSet, Optional, Tuple
 
 from .extract import Program, call_sites
 from .icfg import ICFG, build_icfg
@@ -29,6 +29,7 @@ class CallGraph:
     sites: Tuple[Site, ...]  # every syntactic call site of reachable functions
     labels: Dict[Node, str]  # unique printable id per node
     style: str = "full"  # id style: full | module | short (see FuncId.render)
+    state: Optional[State] = None  # the solver state this graph was built from (for later passes)
 
     def name(self, f: FuncId) -> str:
         return f.render(self.style)
@@ -65,4 +66,4 @@ def build_callgraph(prog: Program, state: State, style: str = "full") -> CallGra
     for label, group in by_label.items():
         for i, n in enumerate(group):
             labels[n] = label if len(group) == 1 else f"{label}#{i + 1}"
-    return CallGraph(prog, nodes, edges, sites, labels, style)
+    return CallGraph(prog, nodes, edges, sites, labels, style, state)
