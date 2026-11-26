@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, FrozenSet, Tuple
 
 from .extract import Program, call_sites
+from .icfg import ICFG, build_icfg
 from .model import Edge, FuncId, Node, Site
 from .transfer import State
 
@@ -38,6 +39,14 @@ class CallGraph:
     def function_edges(self) -> FrozenSet[Tuple[str, str]]:
         """Context-insensitive view: (caller name, callee name) pairs."""
         return frozenset((self.name(e.caller.func), self.name(e.callee.func)) for e in self.edges)
+
+    def icfg(self) -> ICFG:
+        """Interprocedural CFG of the analysed (function, context) nodes."""
+        cached = self.__dict__.get("_icfg")
+        if cached is None:
+            cached = build_icfg(self.prog, self.nodes, self.edges)
+            object.__setattr__(self, "_icfg", cached)
+        return cached
 
     def targets(self, site: Site) -> FrozenSet[str]:
         return frozenset(self.name(e.callee.func) for e in self.edges if e.site == site)

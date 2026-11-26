@@ -7,12 +7,14 @@ Vocabulary:
            function (param -> set of closures) plus the captured defining node
   Node     (function, context): one analysed instance of a function
   Edge     call edge between two nodes at a syntactic call site
+  CFG      per-function control-flow graph over program points (CFGNode)
+  IEdge    ICFG edge between program points of two (function, context) nodes
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import PurePath
-from typing import FrozenSet, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -137,3 +139,86 @@ class Edge:
     caller: Node
     site: Site
     callee: Node
+
+
+# ---------------------------------------------------------------- control flow
+# CFG node kinds
+ENTRY, EXIT = "entry", "exit"
+STMT = "stmt"              # a statement's own effect (after the calls inside it)
+BRANCH = "branch"          # a test: if / while / assert / case / and-or / comprehension filter
+LOOP = "loop"              # loop head: while join point, for / comprehension "next item"
+HANDLER = "handler"        # start of an except clause
+CALL = "call"              # the call is made here ...
+AFTER_CALL = "after_call"  # ... and its result arrives here (the return point)
+
+# edge kinds: intraprocedural ...
+FLOW, TRUE, FALSE, EXC, CALL_TO_RETURN = "flow", "true", "false", "exc", "call_to_return"
+# ... and interprocedural (ICFG only)
+CALL_EDGE, RETURN_EDGE = "call", "return"
+
+
+@dataclass(frozen=True)
+class CFGNode:
+    """One program point of a function body."""
+
+    idx: int
+    kind: str
+    line: int
+    col: int
+    text: str
+    site: Optional[Site] = None  # set for CALL / AFTER_CALL
+
+
+@dataclass(frozen=True)
+class CFGEdge:
+    src: int
+    dst: int
+    kind: str = FLOW
+
+
+@dataclass(frozen=True, eq=False)
+class CFG:
+    """Control-flow graph of one function. Context independent: every
+    (function, context) node of the analysis shares its function's CFG."""
+
+    func: FuncId
+    nodes: Tuple[CFGNode, ...]
+    edges: Tuple[CFGEdge, ...]
+    calls: Dict[Site, Tuple[int, int]]  # site -> (CALL point, AFTER_CALL point)
+    entry: int = 0
+    exit: int = 1
+
+    def succ(self, i: int) -> List[CFGEdge]:
+        return self._adj()[0].get(i, [])
+
+    def pred(self, i: int) -> List[CFGEdge]:
+        return self._adj()[1].get(i, [])
+
+    def _adj(self):
+        adj = self.__dict__.get("_adj_cache")
+        if adj is None:
+            out: Dict[int, List[CFGEdge]] = {}
+            inc: Dict[int, List[CFGEdge]] = {}
+            for e in self.edges:
+                out.setdefault(e.src, []).append(e)
+                inc.setdefault(e.dst, []).append(e)
+            adj = (out, inc)
+            object.__setattr__(self, "_adj_cache", adj)
+        return adj
+
+
+@dataclass(frozen=True)
+class IEdge:
+    """ICFG edge from program point `src_pt` of `src` to `dst_pt` of `dst`.
+
+    kind: an intraprocedural kind (src is dst), CALL_EDGE (CALL point -> callee
+    entry) or RETURN_EDGE (callee exit -> AFTER_CALL point of the same caller
+    context, so returns go back only to the context that made the call).
+    """
+
+    src: Node
+    src_pt: int
+    dst: Node
+    dst_pt: int
+    kind: str
+    site: Optional[Site] = None

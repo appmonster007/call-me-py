@@ -1,16 +1,17 @@
-"""Step 1: function identifiers, scopes, call sites.
+"""Step 1: function identifiers, scopes, call sites, control flow.
 
 Builds a `Program`: every function (def, async def, lambda, module body) gets a
-`FuncId`, a lexical parent, a signature and its set of local names.
+`FuncId`, a lexical parent, a signature, its set of local names and a CFG.
 """
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
-from .model import FuncId, Site
+from .cfg import build_cfg
+from .model import CFG, FuncId, Site
 
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 SCOPE_NODES = FUNC_NODES + (ast.Lambda, ast.ClassDef)
@@ -45,6 +46,7 @@ class Program:
     module: FuncId
     funcs: Dict[FuncId, FuncInfo]
     by_node: Dict[int, FuncId]
+    cfgs: Dict[FuncId, CFG] = field(default_factory=dict)  # one per function
 
     def nesting_edges(self) -> List[Tuple[FuncId, FuncId]]:
         """The function-identifier graph: (lexical parent, child)."""
@@ -157,7 +159,8 @@ def build_program(source: str, filename: str = "<string>") -> Program:
 
     for s in tree.body:
         walk(s, "", mod)
-    return Program(filename, tree, mod, funcs, by_node)
+    cfgs = {fid: build_cfg(info, make_site) for fid, info in funcs.items()}
+    return Program(filename, tree, mod, funcs, by_node, cfgs)
 
 
 def parse_file(path) -> Program:

@@ -1,8 +1,8 @@
-"""python -m callme FILE -o OUT [--format json|dot] [--contexts] [--returns]"""
+"""python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns] [--icfg]"""
 import argparse
 import sys
 
-from . import analyze_file, to_dot, to_json
+from . import analyze_file, to_dot, to_icfg_dot, to_json
 from .extract import call_sites
 
 
@@ -22,7 +22,9 @@ def print_graph(cg) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="callme", description=__doc__)
     ap.add_argument("file")
-    ap.add_argument("--format", choices=["json", "dot"], default="json")
+    ap.add_argument("--format", choices=["json", "dot", "icfg"], default="json",
+                    help="icfg = DOT of the interprocedural CFG (one cluster per context)")
+    ap.add_argument("--icfg", action="store_true", help="JSON: include CFGs and call/return edges")
     ap.add_argument("--contexts", action="store_true", help="DOT: one node per (function, context)")
     ap.add_argument("--returns", action="store_true", help="DOT: add dotted return edges")
     ap.add_argument("--include-unreachable", action="store_true",
@@ -41,7 +43,12 @@ def main(argv=None) -> int:
     if a.print_graph:
         print_graph(cg)
     if a.output:  # without -o nothing is written or printed (except --print-graph)
-        text = to_json(cg) if a.format == "json" else to_dot(cg, a.contexts, a.returns)
+        if a.format == "json":
+            text = to_json(cg, icfg=a.icfg)
+        elif a.format == "icfg":
+            text = to_icfg_dot(cg)
+        else:
+            text = to_dot(cg, a.contexts, a.returns)
         with open(a.output, "w", encoding="utf-8") as f:
             f.write(text)
     return 0
