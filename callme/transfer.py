@@ -24,8 +24,9 @@ Env = Dict[str, FrozenSet[Closure]]
 class State:
     """Global fixpoint state: contexts, local envs, return values, call edges."""
 
-    def __init__(self, max_ctx: int = 16) -> None:
+    def __init__(self, max_ctx: int = 16, module=None) -> None:
         self.max_ctx = max_ctx
+        self.module = module  # FuncId of the program this state belongs to
         self.order: List[Node] = []
         self.by_func: Dict = {}
         self.envs: Dict[Node, Env] = {}
@@ -33,6 +34,23 @@ class State:
         self.edges: set = set()
         self.entry: Dict[Node, Env] = {}  # entry states of widened contexts
         self.changed = False
+
+    def copy(self) -> "State":
+        """Independent copy (values are immutable, containers are not)."""
+        new = State(self.max_ctx, self.module)
+        new.order = list(self.order)
+        new.by_func = {f: set(g) for f, g in self.by_func.items()}
+        new.envs = {n: dict(e) for n, e in self.envs.items()}
+        new.ret = dict(self.ret)
+        new.edges = set(self.edges)
+        new.entry = {n: dict(e) for n, e in self.entry.items()}
+        return new
+
+    def same_result(self, other: "State") -> bool:
+        """Equal analysis results (ignores node registration order and `changed`)."""
+        return (set(self.order) == set(other.order) and self.envs == other.envs
+                and self.ret == other.ret and self.edges == other.edges
+                and self.entry == other.entry)
 
     def register(self, node: Node) -> None:
         group = self.by_func.setdefault(node.func, set())
@@ -370,10 +388,17 @@ class Interp:
             self.block(self.info.body)
 
 
-def analyze(node: Node, state: State, prog: Program):
-    """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)])."""
+def analyze(node: Node, state: State, prog: Program, env: Optional[Env] = None):
+    """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)]).
+
+    The local fixpoint starts from the entry state joined with `env` (default: the
+    env already stored for `node` in `state`), so the returned env can be passed
+    straight back in: analyze(n, s, p, analyze(n, s, p)[0]) is stable.
+    """
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)
+    for k, v in (state.envs.get(node, {}) if env is None else env).items():
+        it.env[k] = it.env.get(k, EMPTY) | v
     while True:
         snapshot = dict(it.env)
         it.ret, it.calls = EMPTY, []
