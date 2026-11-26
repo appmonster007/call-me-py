@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ask again until nothing changes · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="04-fixpoint" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Ask again until nothing changes</h1>
+    <p class="lede">When the module reaches <code>pick(True)(3)</code> on line 15, nobody has analysed
+      <code>pick</code> yet. Its return value is unknown. The fix is simple: keep re-analysing
+      everything until a whole round learns nothing new.</p>
+    <p>This is the real trace of <code>solve()</code> on chapter 1's program, round by round.</p>
+  </div>
+
+  <div class="scene wide" id="rounds"></div>
+
+  <div class="prose">
+    <p>Inside a single node there is a smaller version of the same loop: <code>analyze</code> runs the
+      body again until the node's own environment stops changing. That handles loops, where a later
+      line feeds an earlier one.</p>
+
+    <details class="ponder">
+      <summary>Why does <code>pick(True)</code> reach <code>double</code> too?</summary>
+      <p>The analysis tracks tokens only. <code>True</code> carries none, so both outcomes of
+        <code>pick</code> share one context, and <code>square if flag else double</code> is the union
+        of both branches. Ignoring plain values is a deliberate trade: much cheaper, still sound,
+        sometimes imprecise.</p>
+    </details>
+
+    <details class="ponder">
+      <summary>Why is the loop guaranteed to stop?</summary>
+      <p>Everything the solver stores only grows: sets are unioned, never shrunk. And there are
+        finitely many tokens and nodes, because the analysis <em>widens</em> whatever could grow
+        forever: contexts past <code>max_contexts</code>, closures nested deeper than
+        <code>MAX_DEPTH</code>, partials beyond <code>MAX_PARTIAL_ARGS</code>. A quantity that only
+        grows and has a ceiling must stop growing.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/solver.py::solve"></code-ref></dt>
+        <dd>the round loop; its <code>on_round</code> hook is how <code>docs/build.py</code> recorded this trace</dd>
+        <dt><code-ref sym="callme/transfer.py::analyze"></code-ref></dt>
+        <dd>one node to its local fixpoint: run the body until its env stops changing</dd>
+        <dt><code-ref sym="callme/transfer.py::State"></code-ref></dt>
+        <dd>everything the rounds accumulate: nodes, envs, return values, edges, heap, class tables</dd>
+        <dt><code-ref sym="callme/transfer.py::State.register"></code-ref></dt>
+        <dd>a new node joins <code>order</code> and sets <code>changed</code>, which buys another round</dd>
+        <dt><code-ref sym="callme/transfer.py::MAX_DEPTH"></code-ref></dt>
+        <dd>one of the widening limits that keep the state finite</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="04-fixpoint.js"></script>
+</body>
+</html>

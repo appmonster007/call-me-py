@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Values that wait · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="06-heap" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Values that wait</h1>
+    <p class="lede">Line 9 puts <code>f</code> into the list through <code>b</code>. Line 10 calls an
+      element of <code>a</code>. Same list, two names: the analysis has to know they are one object.</p>
+  </div>
+
+  <div class="scene wide" id="heap"></div>
+
+  <div class="prose">
+    <p>Two simplifications keep this cheap. Indices are ignored: <code>a[0]</code> may be any element.
+      And the heap only grows (<em>weak updates</em>): nothing stored is ever removed, because the
+      analysis can't be sure a removal really happened.</p>
+
+    <details class="ponder">
+      <summary>Why not just add <code>f</code> to the value of <code>b</code> on line 9?</summary>
+      <p>Because values are copied on assignment: changing <code>b</code>'s value would not change
+        <code>a</code>'s. The Box is the one thing every alias shares, so storing into it is what lets a
+        write reach every name, including lists passed into other functions, like
+        <code>register(handlers, f)</code> filling the caller's list.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/model.py::Box"></code-ref></dt>
+        <dd>a mutable container token, one per allocation site</dd>
+        <dt><code-ref sym="callme/model.py::Alloc"></code-ref></dt>
+        <dd>an allocation site: function, line, column</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.new_box"></code-ref></dt>
+        <dd>a list / set / dict literal or comprehension gets its Box</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp._mutate_container"></code-ref></dt>
+        <dd><code>append</code>, <code>extend</code>, <code>insert</code>, <code>update</code>, … become stores</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.store"></code-ref></dt>
+        <dd>weak update: <code>heap[box] ∪= vals</code></dd>
+        <dt><code-ref sym="callme/transfer.py::State.deref"></code-ref></dt>
+        <dd>a value plus everything stored in its boxes, transitively</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.e_Subscript"></code-ref></dt>
+        <dd><code>a[0]</code>: <code>__getitem__</code> on objects, <code>deref</code> on containers</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="06-heap.js"></script>
+</body>
+</html>

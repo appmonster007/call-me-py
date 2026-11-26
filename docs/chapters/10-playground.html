@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Playground · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="10-playground" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Playground</h1>
+    <p class="lede">Write Python and watch the real analyzer build its call graph, in your browser.</p>
+    <p class="small muted">This page runs the <code>callme</code> package itself, as of the last
+      <code>docs/build.py</code>, on <a href="https://pyodide.org" target="_blank" rel="noopener">Pyodide</a>
+      (Python compiled to WebAssembly). The first load downloads about 10 MB and needs internet; the
+      other pages work offline. Until it's ready you see the result recorded at build time.</p>
+  </div>
+
+  <div class="scene wide" id="playground"></div>
+
+  <div class="prose">
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/__init__.py::analyze_source"></code-ref></dt>
+        <dd>what this page calls: build the program, solve, build the call graph</dd>
+        <dt><code-ref sym="callme/export.py::to_dict"></code-ref></dt>
+        <dd>the JSON this page draws</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="10-playground.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Who does f() call? · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="01-who-is-f" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Who does <code>f()</code> call?</h1>
+    <p class="lede">Here is a whole program. Before reading on, guess: which functions can line 8 call?</p>
+  </div>
+
+  <div class="scene wide" id="names"></div>
+
+  <div class="prose">
+    <h2>Follow the values</h2>
+    <p>The analyzer runs the program, but not on real values. Every expression evaluates to the set
+      of functions it <em>might</em> be. Step through it with ▶ or the arrow keys.</p>
+  </div>
+
+  <div class="scene wide" id="values"></div>
+
+  <div class="prose">
+    <details class="ponder">
+      <summary>Why a set, and not just one function?</summary>
+      <p>One expression can hold different functions on different paths. Line 11,
+        <code>square if flag else double</code>, evaluates to {square, double}: one of these, and we
+        can't tell which. Calling every token in the set can only add edges, never miss one. That makes
+        the analysis <strong>sound</strong>, at the price of some <strong>precision</strong>.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/model.py::Closure"></code-ref></dt>
+        <dd>the token for a user function: which function, created while which node was running</dd>
+        <dt><code-ref sym="callme/model.py::Vals"></code-ref></dt>
+        <dd>an abstract value: a frozenset of tokens</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.eval"></code-ref></dt>
+        <dd>evaluates an expression by dispatching on its AST type: <code>e_Name</code>, <code>e_Call</code>, …</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.lookup"></code-ref></dt>
+        <dd>a name's value: the local env, then enclosing functions, then builtins</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.e_Call"></code-ref></dt>
+        <dd>evaluates the callee and the arguments, then applies</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.apply"></code-ref></dt>
+        <dd>for each token in the callee's set: bind the arguments, record the edge, use its return value</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="01-who-is-f.js"></script>
+</body>
+</html>

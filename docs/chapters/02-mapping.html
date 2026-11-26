@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapping the program · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="02-mapping" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Mapping the program</h1>
+    <p class="lede">Before it evaluates anything, the analyzer takes inventory: every function, where
+      it lives, which names it owns, which calls it contains.</p>
+    <p>This is <code>extract.py</code>, one pass over Python's AST. Step through the functions, or
+      click a line of code to jump to the function it belongs to.</p>
+  </div>
+
+  <div class="scene wide" id="inventory"></div>
+
+  <div class="prose">
+    <details class="ponder">
+      <summary>Why does the analyzer need to know each function's locals in advance?</summary>
+      <p>Python decides scope statically: a name assigned anywhere in a function is local to the
+        <em>whole</em> function, even on lines before the assignment. So <code>lookup</code> must know,
+        before running a body, whether a name is local or belongs to an enclosing function.
+        <code>scope_locals</code> applies exactly that rule, honouring <code>global</code> and
+        <code>nonlocal</code>.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/extract.py::build_program"></code-ref></dt>
+        <dd>one walk over the AST: a <code>FuncInfo</code> per def / lambda, a <code>ClassInfo</code> per class</dd>
+        <dt><code-ref sym="callme/extract.py::FuncInfo"></code-ref></dt>
+        <dd>id, kind, lexical parent, signature, locals, owner class, global / nonlocal names</dd>
+        <dt><code-ref sym="callme/model.py::_SymId.render">FuncId.render</code-ref></dt>
+        <dd>the three id styles: <code>full</code>, <code>module</code>, <code>short</code></dd>
+        <dt><code-ref sym="callme/extract.py::walk_scope"></code-ref></dt>
+        <dd>iterate one scope without entering nested ones (but including their decorators and defaults)</dd>
+        <dt><code-ref sym="callme/extract.py::scope_locals"></code-ref></dt>
+        <dd>Python's rule for which names are local to a scope</dd>
+        <dt><code-ref sym="callme/extract.py::call_sites"></code-ref></dt>
+        <dd>the syntactic call sites and decorator applications a function executes</dd>
+        <dt><code-ref sym="callme/__main__.py::print_graph"></code-ref></dt>
+        <dd><code>python -m callme FILE --print-graph</code> prints this inventory</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="02-mapping.js"></script>
+</body>
+</html>

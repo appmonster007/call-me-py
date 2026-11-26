@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Functions that remember · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="05-closures" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>Functions that remember</h1>
+    <p class="lede"><code>wrap(inc)</code> and <code>wrap(dec)</code> both return <code>run</code>, and
+      only one of them is called. To know that <code>a(1)</code> reaches <code>inc</code> and not
+      <code>dec</code>, a function value has to remember <em>where</em> it was created.</p>
+  </div>
+
+  <div class="scene wide" id="closures"></div>
+
+  <div class="prose">
+    <p>The same tether answers <code>nonlocal</code> and <code>global</code> in the other direction: a
+      write from an inner function is collected in <code>State.extern</code> and merged into the
+      owner's environment the next time the owner is analysed.</p>
+
+    <details class="ponder">
+      <summary>Can tethers chain forever?</summary>
+      <p>A closure made inside a closure made inside a closure… Each level nests one context inside
+        another, and that could grow without end. Past <code>MAX_DEPTH</code> = 3,
+        <code>mk_closure</code> drops the tether (<code>parent=None</code>). Lookups then take the union
+        over every context of the enclosing function: less precise, but finite.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/model.py::Closure"></code-ref></dt>
+        <dd><code>func</code> plus <code>parent</code>, the node it was created in: the tether</dd>
+        <dt><code-ref sym="callme/transfer.py::mk_closure"></code-ref></dt>
+        <dd>creates the token, and drops the tether past <code>MAX_DEPTH</code></dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.s_FunctionDef"></code-ref></dt>
+        <dd>a <code>def</code> statement: evaluate decorators, bind the name to the token</dd>
+        <dt><code-ref sym="callme/transfer.py::State.resolve"></code-ref></dt>
+        <dd>calling a closure makes its <code>parent</code> the new node's <code>ctx.parent</code></dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.lookup"></code-ref></dt>
+        <dd>a free name walks up <code>ctx.parent</code>, one enclosing function at a time</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.bind"></code-ref></dt>
+        <dd>where an assignment goes: local env, class namespace, or <code>State.extern</code> for global / nonlocal</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="05-closures.js"></script>
+</body>
+</html>

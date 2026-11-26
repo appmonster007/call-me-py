@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>One function, many lives · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="03-contexts" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>One function, many lives</h1>
+    <p class="lede"><code>ident</code> returns whatever it is given. It's called twice, with two
+      different functions. If the analysis keeps a single summary of <code>ident</code>, the two calls
+      blur together.</p>
+    <p>Each step below is a real run of the analyzer with a different <code>max_contexts</code>.</p>
+  </div>
+
+  <div class="scene wide" id="contexts"></div>
+
+  <div class="prose">
+    <details class="ponder">
+      <summary>Doesn't a node per argument combination explode?</summary>
+      <p>It could. Two things keep it small. A context records only parameters that hold tokens:
+        <code>square(3)</code> and <code>square(4)</code> share one context, because numbers carry no
+        functions. And <code>max_contexts</code> caps whatever is left. Past the cap, the analysis gets
+        less precise; it never misses a call.</p>
+    </details>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/model.py::Ctx"></code-ref></dt>
+        <dd>a context: which tokens each parameter may hold, the defining node, and the <code>merged</code> flag</dd>
+        <dt><code-ref sym="callme/model.py::Node"></code-ref></dt>
+        <dd>(function, context): the unit the solver analyses</dd>
+        <dt><code-ref sym="callme/transfer.py::Interp.bind_args"></code-ref></dt>
+        <dd>matches a call's arguments to the signature; the result is the callee's context</dd>
+        <dt><code-ref sym="callme/transfer.py::State.resolve"></code-ref></dt>
+        <dd>finds or creates the node; past <code>max_ctx</code> it merges into the widened <code>[*]</code> node</dd>
+        <dt><code-ref sym="callme/callgraph.py::node_label"></code-ref></dt>
+        <dd>prints nodes as <code>ident[f={square}]</code> or <code>ident[*]</code></dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="03-contexts.js"></script>
+</body>
+</html>

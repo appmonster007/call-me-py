@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>From state to graph · call-me-py explained</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <script src="../assets/core.js"></script>
+  <script src="../assets/views.js"></script>
+  <script src="../assets/page.js"></script>
+</head>
+<body data-chapter="09-output" data-root="..">
+<main class="page">
+  <div class="prose">
+    <h1>From state to graph</h1>
+    <p class="lede">The solver's result is a graph of <em>nodes</em>, each a function in a context.
+      People want a graph of <em>functions</em>. And we want evidence that it is right.</p>
+  </div>
+
+  <div class="scene wide" id="collapse"></div>
+
+  <div class="prose">
+    <h2>How do we know it's right?</h2>
+    <p>Each case in <code>examples/cases/</code> lists, in its docstring, the <code>EXPECTED</code> edges
+      seen in a traced run of the program: the ground truth. It may also list edges a static analysis is
+      allowed to add: <code>STATIC_ONLY</code> (dead code) and <code>SPAWN</code> (threads, tasks). Two
+      tests per case:</p>
+    <ul>
+      <li><strong>test_sound</strong>: every expected edge is found. Missing edges are the serious failure.</li>
+      <li><strong>test_precise</strong>: nothing is found outside expected ∪ allowed.</li>
+    </ul>
+    <p>Pick a case. These are the results at the last <code>docs/build.py</code> run.</p>
+  </div>
+
+  <div class="scene wide" id="check"></div>
+
+  <div class="prose">
+    <p>To add a case, drop a file into <code>examples/cases/&lt;family&gt;/</code> with a docstring in the
+      <code-ref sym="examples/cases/README.md">case format</code-ref>. A new family is just a new folder;
+      <code>pytest.ini</code> chooses which families run.</p>
+
+    <section class="in-code">
+      <h2>In the code</h2>
+      <dl>
+        <dt><code-ref sym="callme/callgraph.py::build_callgraph"></code-ref></dt>
+        <dd>solver state → <code>CallGraph</code>: nodes, sorted edges, a unique label per node</dd>
+        <dt><code-ref sym="callme/callgraph.py::CallGraph.function_edges"></code-ref></dt>
+        <dd>the context-insensitive view: (caller, callee) function pairs</dd>
+        <dt><code-ref sym="callme/export.py::to_dict"></code-ref></dt>
+        <dd>JSON: functions, call sites with targets, edges, contexts, context edges</dd>
+        <dt><code-ref sym="callme/export.py::to_dot"></code-ref></dt>
+        <dd>Graphviz DOT; <code>--contexts</code> draws one box per node</dd>
+        <dt><code-ref sym="tests/test_examples.py::test_sound"></code-ref></dt>
+        <dd>expected ⊆ found</dd>
+        <dt><code-ref sym="tests/test_examples.py::test_precise"></code-ref></dt>
+        <dd>found ⊆ expected ∪ STATIC_ONLY ∪ SPAWN</dd>
+        <dt><code-ref sym="tests/conftest.py"></code-ref></dt>
+        <dd>feature families: which folders of cases run (<code>--families</code>, <code>pytest.ini</code>)</dd>
+      </dl>
+    </section>
+  </div>
+</main>
+<script src="../generated/data.js"></script>
+<script src="09-output.js"></script>
+</body>
+</html>

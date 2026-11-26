@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>call-me-py explained</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="assets/core.js"></script>
+  <script src="assets/views.js"></script>
+  <script src="assets/page.js"></script>
+</head>
+<body data-chapter="index" data-root=".">
+<main class="page">
+  <div class="prose chapter-head">
+    <div class="kicker">call-me-py, explained</div>
+    <h1>Who calls whom, when functions are values?</h1>
+    <p class="lede">call-me-py reads a Python program without running it and draws its call graph,
+      including calls through variables, parameters, return values, containers, objects and builtins.
+      These pages explain how it works, one idea at a time, and point to the code that does it.</p>
+  </div>
+
+  <div class="scene wide" id="hero"></div>
+
+  <div class="prose">
+    <h2>The pipeline</h2>
+    <p>Five files do the work. <code>solver</code> and <code>transfer</code> form a loop: the solver keeps
+      asking <code>transfer</code> to re-analyse functions until nothing changes.</p>
+  </div>
+  <div class="wide stages" id="stages">
+    <div class="stage-card" data-stage="extract">
+      <div class="stage-name">extract</div><code-ref sym="callme/extract.py"></code-ref>
+      <p>finds every function, its scope and its call sites</p>
+    </div>
+    <div class="stage-arrow" aria-hidden="true">→</div>
+    <div class="stage-card" data-stage="solver">
+      <div class="stage-name">solver</div><code-ref sym="callme/solver.py"></code-ref>
+      <p>re-analyses every (function, context) node until a round changes nothing</p>
+    </div>
+    <div class="stage-arrow" aria-hidden="true">⇄</div>
+    <div class="stage-card" data-stage="transfer">
+      <div class="stage-name">transfer</div><code-ref sym="callme/transfer.py"></code-ref>
+      <p>evaluates one function body on abstract values; <code>stubs.py</code> covers the builtins</p>
+    </div>
+    <div class="stage-arrow" aria-hidden="true">→</div>
+    <div class="stage-card" data-stage="callgraph">
+      <div class="stage-name">callgraph</div><code-ref sym="callme/callgraph.py"></code-ref>
+      <p>collapses the solver state into a call graph</p>
+    </div>
+    <div class="stage-arrow" aria-hidden="true">→</div>
+    <div class="stage-card" data-stage="export">
+      <div class="stage-name">export</div><code-ref sym="callme/export.py"></code-ref>
+      <p>writes JSON or Graphviz DOT</p>
+    </div>
+  </div>
+
+  <div class="prose">
+    <h2>Chapters</h2>
+    <ol class="toc" id="toc"></ol>
+
+    <h2>Reading the pictures</h2>
+    <p>The same shapes and colors mean the same thing on every page.</p>
+    <div class="legend" id="legend"></div>
+    <p class="muted small">Every analyzer result on these pages comes from a real run, recorded by
+      <code>docs/build.py</code>. Buttons like <code-ref sym="callme/solver.py::solve"></code-ref> open the
+      actual source. Scenes step with ◀ ▶ or the arrow keys; <code>#scene=3</code> in the address links
+      to a step.</p>
+  </div>
+</main>
+<script src="generated/data.js"></script>
+<script src="index.js"></script>
+</body>
+</html>
