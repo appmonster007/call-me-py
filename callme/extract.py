@@ -1,17 +1,19 @@
-"""Step 1: function identifiers, scopes, call sites.
+"""Step 1: function identifiers, scopes, call sites, control flow.
 
 Builds a `Program`: every function (def, async def, lambda, module body) gets a
-`FuncId`, a lexical parent, a signature and its set of local names.
+`FuncId`, a lexical parent, a signature, its set of local names and a CFG.
 """
 from __future__ import annotations
 
 import ast
+import hashlib
 import os
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .model import ClassId, FuncId, Site
+from .cfg import build_cfg
+from .model import CFG, ClassId, FuncId, Site
 
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 SCOPE_NODES = FUNC_NODES + (ast.Lambda, ast.ClassDef)
@@ -62,6 +64,8 @@ class Program:
     by_node: dict[int, FuncId]
     classes: dict[ClassId, ClassInfo]
     class_by_node: dict[int, ClassId]
+    cfgs: dict[FuncId, CFG] = field(default_factory=dict)  # one per function
+    fingerprint: str = ""  # hash of file name + source; identifies this program version
 
     def nesting_edges(self) -> list[tuple[FuncId, FuncId]]:
         """The function-identifier graph: (lexical parent, child)."""
@@ -108,6 +112,15 @@ def make_sig(args: ast.arguments) -> Sig:
     )
 
 
+def pattern_names(n: ast.AST) -> tuple[str, ...]:
+    """Names captured by one `match` pattern node (MatchAs / MatchStar / MatchMapping)."""
+    if isinstance(n, (ast.MatchAs, ast.MatchStar)):
+        return (n.name,) if n.name else ()
+    if isinstance(n, ast.MatchMapping):
+        return (n.rest,) if n.rest else ()
+    return ()
+
+
 def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[str]:
     names = set(params)
     declared: set[str] = set()
@@ -124,6 +137,7 @@ def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[st
             names.add(n.name)
         elif isinstance(n, (ast.Global, ast.Nonlocal)):
             declared.update(n.names)
+        names.update(pattern_names(n))
     return frozenset(names - declared)
 
 
@@ -216,7 +230,14 @@ def build_program(source: str, filename: str = "<string>") -> Program:
         walk(s, "", mod)
     # `global x` makes x a module variable even if the module itself never assigns it
     funcs[mod].locals |= frozenset(n for f in funcs.values() for n in f.globals)
-    return Program(filename, tree, mod, funcs, by_node, classes, class_by_node)
+    cfgs = {fid: build_cfg(fid, info.node, info.body, make_site) for fid, info in funcs.items()}
+    return Program(filename, tree, mod, funcs, by_node, classes, class_by_node,
+                   cfgs, fingerprint(source, filename))
+
+
+def fingerprint(source: str, filename: str) -> str:
+    """Two parses get the same fingerprint iff file name and source are equal."""
+    return hashlib.sha256(f"{filename}\0{source}".encode()).hexdigest()
 
 
 def parse_file(path: str | os.PathLike[str]) -> Program:
@@ -235,18 +256,6 @@ def make_site(caller: FuncId, node: ast.expr, kind: str = "call") -> Site:
 
 
 def call_sites(prog: Program, fid: FuncId) -> tuple[Site, ...]:
-    """Syntactic call sites (and decorator applications) executed by `fid`."""
-    out: set[Site] = set()
-    work: list[Iterable[ast.AST]] = [prog.funcs[fid].body]
-    while work:
-        for n in walk_scope(work.pop()):
-            if isinstance(n, ast.Call):
-                out.add(make_site(fid, n, "call"))
-            elif isinstance(n, FUNC_NODES):
-                for d in n.decorator_list:
-                    out.add(make_site(fid, d, "decorator"))
-            elif isinstance(n, ast.ClassDef):
-                for d in n.decorator_list:
-                    out.add(make_site(fid, d, "decorator"))
-                work.append(n.body)
-    return tuple(sorted(out, key=lambda s: (s.line, s.col, s.kind)))
+    """Call sites (and decorator applications) executed by `fid`, including those
+    in class bodies; taken from the CFG so both always agree."""
+    return tuple(sorted(prog.cfgs[fid].calls, key=lambda s: (s.line, s.col, s.kind)))

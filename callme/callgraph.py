@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .extract import Program, call_sites
+from .icfg import ICFG, build_icfg
 from .model import Edge, FuncId, Node, Site, token_label
 from .transfer import State
 
@@ -26,6 +27,7 @@ class CallGraph:
     edges: tuple[Edge, ...]
     sites: tuple[Site, ...]  # every syntactic call site of reachable functions
     labels: dict[Node, str]  # unique printable id per node
+    state: State  # the solver state this graph was built from (for later passes)
     style: str = "full"  # id style: full | module | short (see FuncId.render)
 
     def name(self, f: FuncId) -> str:
@@ -37,6 +39,14 @@ class CallGraph:
     def function_edges(self) -> frozenset[tuple[str, str]]:
         """Context-insensitive view: (caller name, callee name) pairs."""
         return frozenset((self.name(e.caller.func), self.name(e.callee.func)) for e in self.edges)
+
+    def icfg(self) -> ICFG:
+        """Interprocedural CFG of the analysed (function, context) nodes."""
+        cached: ICFG | None = self.__dict__.get("_icfg")
+        if cached is None:
+            cached = build_icfg(self.prog, self.nodes, self.edges)
+            object.__setattr__(self, "_icfg", cached)
+        return cached
 
     def targets(self, site: Site) -> frozenset[str]:
         return frozenset(self.name(e.callee.func) for e in self.edges if e.site == site)
@@ -59,4 +69,4 @@ def build_callgraph(prog: Program, state: State, style: str = "full") -> CallGra
     for label, group in by_label.items():
         for i, n in enumerate(group):
             labels[n] = label if len(group) == 1 else f"{label}#{i + 1}"
-    return CallGraph(prog, nodes, edges, sites, labels, style)
+    return CallGraph(prog, nodes, edges, sites, labels, state, style)

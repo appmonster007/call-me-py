@@ -16,7 +16,7 @@ import ast
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import final
 
-from .extract import FuncInfo, Program, make_site
+from .extract import FuncInfo, Program, make_site, pattern_names
 from .model import (
     EMPTY,
     Alloc,
@@ -87,6 +87,7 @@ class State:
     """Global fixpoint state: contexts, local envs, return values, call edges."""
 
     max_ctx: int
+    program: str | None  # Program.fingerprint of the source this state describes
     order: list[Node]
     by_func: dict[FuncId, set[Node]]
     envs: dict[Node, Env]
@@ -102,8 +103,9 @@ class State:
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
-    def __init__(self, max_ctx: int = 16) -> None:
+    def __init__(self, max_ctx: int = 16, program: str | None = None) -> None:
         self.max_ctx = max_ctx
+        self.program = program
         self.order = []
         self.by_func = {}
         self.envs = {}
@@ -118,6 +120,32 @@ class State:
         self.metaclasses = {}
         self._mro_cache = {}
         self.changed = False
+
+    def copy(self) -> State:
+        """Independent copy (values are immutable, containers are not)."""
+        new = State(self.max_ctx, self.program)
+        new.order = list(self.order)
+        new.by_func = {f: set(g) for f, g in self.by_func.items()}
+        new.envs = {n: dict(e) for n, e in self.envs.items()}
+        new.ret = dict(self.ret)
+        new.edges = set(self.edges)
+        new.entry = {n: dict(e) for n, e in self.entry.items()}
+        new.class_attrs = {c: dict(e) for c, e in self.class_attrs.items()}
+        new.inst_attrs = {i: dict(e) for i, e in self.inst_attrs.items()}
+        new.heap = dict(self.heap)
+        new.extern = {f: dict(e) for f, e in self.extern.items()}
+        new.bases = dict(self.bases)
+        new.metaclasses = {c: set(m) for c, m in self.metaclasses.items()}
+        return new
+
+    def same_result(self, other: State) -> bool:
+        """Equal analysis results (ignores node registration order and `changed`)."""
+        return (set(self.order) == set(other.order) and self.envs == other.envs
+                and self.ret == other.ret and self.edges == other.edges
+                and self.entry == other.entry and self.class_attrs == other.class_attrs
+                and self.inst_attrs == other.inst_attrs and self.heap == other.heap
+                and self.extern == other.extern and self.bases == other.bases
+                and self.metaclasses == other.metaclasses)
 
     def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
         attrs = self.class_attrs.setdefault(cls, {})
@@ -1039,6 +1067,17 @@ class Interp:
             vals = res if callee else vals  # unresolved decorator: assume identity
         self.bind(s.name, vals)
 
+    def s_Match(self, s: ast.Match) -> None:
+        subject = self.eval(s.subject)
+        for case in s.cases:
+            for n in ast.walk(case.pattern):
+                if isinstance(n, ast.expr):  # value patterns, class names
+                    self.eval(n)
+                for name in pattern_names(n):
+                    self.bind(name, subject)  # captures: some part of the subject
+            self.eval(case.guard)
+            self.block(case.body)
+
     def s_Assign(self, s: ast.Assign) -> None:
         v = self.eval(s.value)
         for t in s.targets:
@@ -1138,11 +1177,26 @@ class Interp:
             self.block(self.info.body)
 
 
-def analyze(node: Node, state: State, prog: Program) -> tuple[Env, Vals, Calls]:
-    """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)])."""
+def analyze(node: Node, state: State, prog: Program,
+            env: Env | None = None) -> tuple[Env, Vals, Calls]:
+    """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)]).
+
+    The local fixpoint starts from the entry state joined with `env` (default: the
+    env already stored for `node` in `state`). The returned env can be passed back
+    in: with the same `state`, analyze(n, s, p, analyze(n, s, p)[0]) returns the
+    same result.
+
+    Side effect: callee contexts reached for the first time are registered in
+    `state` (State.resolve), and widened contexts may grow their entry state; so do
+    the class / instance attribute tables, the heap and `extern` (global / nonlocal
+    writes). Env, return values and edges are NOT written back; `solver.step` joins
+    them. Pass `state.copy()` to keep a state untouched.
+    """
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)
     for name, vals in state.extern.get(node.func, {}).items():  # global / nonlocal writes
+        it.env[name] = it.env.get(name, EMPTY) | vals
+    for name, vals in (state.envs.get(node, {}) if env is None else env).items():
         it.env[name] = it.env.get(name, EMPTY) | vals
     while True:
         snapshot = dict(it.env)

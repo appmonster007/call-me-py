@@ -50,7 +50,7 @@ from callme.model import (  # noqa: E402
 )
 from callme.solver import solve  # noqa: E402
 from callme.transfer import State  # noqa: E402
-from tests.test_examples import ALLOWED_EXTRA, _blocks  # noqa: E402  (the test suite's own parser)
+from tests.test_examples import ALLOWED_EXTRA, parse_blocks  # noqa: E402  (the test suite's own parser)
 
 REPO = {"url": "https://github.com/appmonster007/call-me-py", "branch": "main"}
 STYLE = "short"  # id style of every name shown in the docs
@@ -248,7 +248,7 @@ def example_json(ex: Example) -> JSON:
 
 def case_json(case: str) -> JSON:
     path = ROOT / "examples" / "cases" / f"{case}.py"
-    blocks = _blocks(ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or "")
+    blocks = parse_blocks(ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or "")
     found = analyze_file(path.relative_to(ROOT), id_style=STYLE).function_edges()
 
     def edges(es: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[list[str]]:

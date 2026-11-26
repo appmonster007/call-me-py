@@ -1,10 +1,14 @@
-"""python -m callme FILE -o OUT [--format json|dot] [--contexts] [--returns]"""
+"""python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns] [--icfg]
+                    [--load-state S] [--save-state S]
+
+Multi-pass from the shell: --save-state keeps the solver state, --load-state resumes it
+(only for the same, unchanged FILE), e.g. a second run with --include-unreachable."""
 import argparse
 import sys
 from collections.abc import Sequence
 
-from . import CallGraph, analyze_file, to_dot, to_json
-from .extract import call_sites
+from . import CallGraph, analyze_file, load_state, save_state, to_dot, to_icfg_dot, to_json
+from .extract import call_sites, parse_file
 
 
 def print_graph(cg: CallGraph) -> None:
@@ -23,7 +27,9 @@ def print_graph(cg: CallGraph) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="callme", description=__doc__)
     ap.add_argument("file")
-    ap.add_argument("--format", choices=["json", "dot"], default="json")
+    ap.add_argument("--format", choices=["json", "dot", "icfg"], default="json",
+                    help="icfg = DOT of the interprocedural CFG (one cluster per context)")
+    ap.add_argument("--icfg", action="store_true", help="JSON: include CFGs and call/return edges")
     ap.add_argument("--contexts", action="store_true", help="DOT: one node per (function, context)")
     ap.add_argument("--returns", action="store_true", help="DOT: add dotted return edges")
     ap.add_argument("--include-unreachable", action="store_true",
@@ -34,15 +40,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="same as --id-style short")
     ap.add_argument("--print-graph", action="store_true",
                     help="print the intermediate graph (nesting + call-site edges, source -> target) to stderr")
-    ap.add_argument("--max-contexts", type=int, default=16)
+    ap.add_argument("--max-contexts", type=int, default=None,
+                    help="context budget per function (default 16, or the loaded state's)")
+    ap.add_argument("--load-state", metavar="PATH", help="resume from a state saved for this file")
+    ap.add_argument("--save-state", metavar="PATH", help="save the solver state after this pass")
     ap.add_argument("-o", "--output", help="write the graph here; without it nothing is printed")
     a = ap.parse_args(argv)
+    state = load_state(parse_file(a.file), a.load_state) if a.load_state else None
     cg = analyze_file(a.file, id_style=a.id_style, include_unreachable=a.include_unreachable,
-                      max_contexts=a.max_contexts)
+                      max_contexts=a.max_contexts, state=state)
+    if a.save_state:
+        save_state(cg.state, a.save_state)
     if a.print_graph:
         print_graph(cg)
     if a.output:  # without -o nothing is written or printed (except --print-graph)
-        text = to_json(cg) if a.format == "json" else to_dot(cg, a.contexts, a.returns)
+        if a.format == "json":
+            text = to_json(cg, icfg=a.icfg)
+        elif a.format == "icfg":
+            text = to_icfg_dot(cg)
+        else:
+            text = to_dot(cg, a.contexts, a.returns)
         with open(a.output, "w", encoding="utf-8") as f:
             f.write(text)
     return 0

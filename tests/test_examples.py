@@ -49,14 +49,15 @@ def _entry(case: Path) -> Path:
     return case / "main.py" if case.is_dir() else case
 
 
-def _blocks(doc: str) -> dict[str, set[Edge]]:
+def parse_blocks(doc: str) -> dict[str, set[Edge]]:
     """Map each docstring header (EXPECTED, STATIC_ONLY, ...) to its indented edge lines."""
     out: dict[str, set[Edge]] = {}
     key: str | None = None
     for line in doc.splitlines():
         if m := _HEADER.match(line):
-            key = m.group(1)
-            out[key] = set()
+            name = str(m.group(1))
+            key = name
+            out[name] = set()
         elif key and line.startswith((" ", "\t")) and " -> " in line:
             caller, callee = line.strip().split(" -> ", 1)
             out[key].add((caller.strip(), callee.strip()))
@@ -67,7 +68,7 @@ def _blocks(doc: str) -> dict[str, set[Edge]]:
 
 def _expectations(case: Path) -> dict[str, set[Edge]]:
     src = _entry(case).read_text(encoding="utf-8")
-    blocks = _blocks(ast.get_docstring(ast.parse(src)) or "")
+    blocks = parse_blocks(ast.get_docstring(ast.parse(src)) or "")
     if "EXPECTED" not in blocks:
         pytest.skip(f"{case.name}: no EXPECTED block")
     return blocks

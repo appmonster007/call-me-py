@@ -9,23 +9,25 @@ the callback (matching a traced run, where C frames are invisible).
 Abstract values are sets of tokens and containers are collapsed to the union of
 their elements, so "the elements of iterable `xs`" is just the value of `xs`.
 
-Adding a stub: write `def _x(it, a, site) -> Vals` and register it with
-`@stub("name", "module.name", ...)`. Names without a dot are builtins (looked up
-when no user binding shadows them); dotted names are reached via
-`import module` / `from module import name`; `<...>` names are internal.
+Adding a stub: write `def _x(it, a, site) -> Vals` (unused parameters get a `_`
+prefix) and register it with `@stub("name", "module.name", ...)`. Names without a
+dot are builtins (looked up when no user binding shadows them); dotted names are
+reached via `import module` / `from module import name`; `<...>` names are internal.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Protocol
 
+from .extract import FuncInfo
 from .model import (
     EMPTY,
     Alloc,
     BoundMethod,
     Box,
     Builtin,
+    ClassId,
     ClassMethod,
     ClassObj,
     Instance,
@@ -35,9 +37,6 @@ from .model import (
     Super,
     Vals,
 )
-
-if TYPE_CHECKING:
-    from .transfer import Interp
 
 STUB_MODULES = frozenset({"dataclasses", "functools", "itertools"})
 METHOD_STUBS = {  # attribute name -> stub (receiver is bound first)
@@ -75,7 +74,51 @@ class Args:
         return self.rest(0) | union(self.kws.values()) | (self.kwstar or EMPTY)
 
 
-StubFn = Callable[["Interp", Args, Site], Vals]
+class HostState(Protocol):
+    """The parts of `transfer.State` stubs use."""
+
+    @property
+    def class_attrs(self) -> Mapping[ClassId, Mapping[str, Vals]]: ...
+
+    def mro(self, cls: ClassId) -> tuple[ClassId, ...]: ...
+
+    def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None: ...
+
+    def lookup_class_attr(self, cls: ClassId, name: str, *,
+                          after: ClassId | None = None) -> Vals: ...
+
+
+class Host(Protocol):
+    """The parts of `transfer.Interp` stubs use (a protocol, so this module needs no
+    import of transfer, which imports it)."""
+
+    @property
+    def info(self) -> FuncInfo: ...
+
+    @property
+    def readonly(self) -> bool: ...
+
+    @property
+    def state(self) -> HostState: ...
+
+    def lookup(self, name: str) -> Vals: ...
+
+    def apply(self, callee: Vals, pos: Sequence[Vals], star: Vals | None,
+              kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals: ...
+
+    def instantiate(self, tok: ClassObj, pos: Sequence[Vals], star: Vals | None,
+                    kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals: ...
+
+    def invoke_dunder(self, recv: Vals, name: str, pos: Sequence[Vals],
+                      site: Site) -> tuple[bool, Vals]: ...
+
+    def invoke_data_descriptor_set(self, obj: Instance, cls_vals: Vals,
+                                   vals: Vals, site: Site) -> bool: ...
+
+    def iterate(self, iterable: Vals, site: Site, *, is_async: bool = False) -> Vals: ...
+
+
+StubFn = Callable[[Host, Args, Site], Vals]
 STUBS: dict[str, StubFn] = {}
 
 
@@ -94,14 +137,14 @@ def union(vs: Iterable[Vals]) -> Vals:
     return out
 
 
-def call(it: Interp, f: Vals, args: list[Vals], site: Site, star: Vals | None = None) -> Vals:
+def call(it: Host, f: Vals, args: list[Vals], site: Site, star: Vals | None = None) -> Vals:
     """Invoke callback(s) `f` from the current node at `site`; returns their result."""
     if not f:
         return EMPTY
     return it.apply(f, args, star, {}, None, site)
 
 
-def fold(it: Interp, f: Vals, acc: Vals, elems: Vals, site: Site) -> Vals:
+def fold(it: Host, f: Vals, acc: Vals, elems: Vals, site: Site) -> Vals:
     """acc = f(acc, e) repeated: iterate the accumulator to a local fixpoint."""
     while True:
         r = call(it, f, [acc, elems], site)
@@ -112,7 +155,7 @@ def fold(it: Interp, f: Vals, acc: Vals, elems: Vals, site: Site) -> Vals:
 
 # ---------------------------------------------------------------- builtins
 @stub("map")
-def _map(it: Interp, a: Args, site: Site) -> Vals:
+def _map(it: Host, a: Args, site: Site) -> Vals:
     f = a.get(0)
     if a.star is not None:  # unknown number of iterables
         return call(it, f, [], site, star=a.rest(1))
@@ -120,14 +163,14 @@ def _map(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("filter", "itertools.filterfalse", "itertools.takewhile", "itertools.dropwhile")
-def _filter(it: Interp, a: Args, site: Site) -> Vals:
+def _filter(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(1)
     call(it, a.get(0), [elems], site)
     return elems
 
 
 @stub("sorted")
-def _sorted(it: Interp, a: Args, site: Site) -> Vals:
+def _sorted(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(0)
     key = a.kw("key")
     if key:
@@ -139,7 +182,7 @@ def _sorted(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("min", "max")
-def _minmax(it: Interp, a: Args, site: Site) -> Vals:
+def _minmax(it: Host, a: Args, site: Site) -> Vals:
     elems = a.pos[0] if len(a.pos) == 1 and a.star is None else a.rest(0)
     key = a.kw("key")
     if key:
@@ -151,7 +194,7 @@ def _minmax(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("list.sort")
-def _list_sort(it: Interp, a: Args, site: Site) -> Vals:
+def _list_sort(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(0)
     key = a.kw("key")
     if key:
@@ -163,18 +206,18 @@ def _list_sort(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("dict.get")
-def _dict_get(it: Interp, a: Args, site: Site) -> Vals:
+def _dict_get(_it: Host, a: Args, _site: Site) -> Vals:
     return a.get(0) | a.get(2, "default")
 
 
 @stub("len")
-def _len(it: Interp, a: Args, site: Site) -> Vals:
+def _len(it: Host, a: Args, site: Site) -> Vals:
     it.invoke_dunder(a.get(0), "__len__", [], site)
     return EMPTY
 
 
 @stub("str")
-def _str(it: Interp, a: Args, site: Site) -> Vals:
+def _str(it: Host, a: Args, site: Site) -> Vals:
     v = a.get(0)
     found, _ = it.invoke_dunder(v, "__str__", [], site)
     if not found:
@@ -183,13 +226,13 @@ def _str(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("repr")
-def _repr(it: Interp, a: Args, site: Site) -> Vals:
+def _repr(it: Host, a: Args, site: Site) -> Vals:
     it.invoke_dunder(a.get(0), "__repr__", [], site)
     return EMPTY
 
 
 @stub("bool")
-def _bool(it: Interp, a: Args, site: Site) -> Vals:
+def _bool(it: Host, a: Args, site: Site) -> Vals:
     v = a.get(0)
     found, _ = it.invoke_dunder(v, "__bool__", [], site)
     if not found:
@@ -198,20 +241,20 @@ def _bool(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("hash")
-def _hash(it: Interp, a: Args, site: Site) -> Vals:
+def _hash(it: Host, a: Args, site: Site) -> Vals:
     it.invoke_dunder(a.get(0), "__hash__", [], site)
     return EMPTY
 
 
 @stub("iter")
-def _iter(it: Interp, a: Args, site: Site) -> Vals:
+def _iter(it: Host, a: Args, site: Site) -> Vals:
     v = a.get(0)
     found, out = it.invoke_dunder(v, "__iter__", [], site)
     return out if found else v
 
 
 @stub("next")
-def _next(it: Interp, a: Args, site: Site) -> Vals:
+def _next(it: Host, a: Args, site: Site) -> Vals:
     v = a.get(0)
     default = a.get(1)
     found, out = it.invoke_dunder(v, "__next__", [], site)
@@ -219,7 +262,7 @@ def _next(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("reversed")
-def _reversed(it: Interp, a: Args, site: Site) -> Vals:
+def _reversed(it: Host, a: Args, site: Site) -> Vals:
     v = a.get(0)
     found, out = it.invoke_dunder(v, "__reversed__", [], site)
     if found:
@@ -229,7 +272,7 @@ def _reversed(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("classmethod")
-def _classmethod(it: Interp, a: Args, site: Site) -> Vals:
+def _classmethod(_it: Host, a: Args, _site: Site) -> Vals:
     return frozenset(
         t if isinstance(t, ClassMethod) else ClassMethod(t)
         for t in a.get(0) if isinstance(t, ClassMethod) or t.depth <= MAX_PARTIAL_DEPTH
@@ -237,7 +280,7 @@ def _classmethod(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("staticmethod")
-def _staticmethod(it: Interp, a: Args, site: Site) -> Vals:
+def _staticmethod(_it: Host, a: Args, _site: Site) -> Vals:
     return frozenset(
         t if isinstance(t, StaticMethod) else StaticMethod(t)
         for t in a.get(0) if isinstance(t, StaticMethod) or t.depth <= MAX_PARTIAL_DEPTH
@@ -245,7 +288,7 @@ def _staticmethod(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("super")
-def _super(it: Interp, a: Args, site: Site) -> Vals:
+def _super(it: Host, a: Args, _site: Site) -> Vals:
     if not a.pos:  # 0-arg super(): enclosing class + first positional param (self / cls)
         owner = it.info.owner
         if owner is None or not it.info.sig.pos:
@@ -262,7 +305,7 @@ def _prop_fn(v: Vals) -> Vals:
 
 
 @stub("property")
-def _property(it: Interp, a: Args, site: Site) -> Vals:
+def _property(_it: Host, a: Args, _site: Site) -> Vals:
     return frozenset([Property(
         _prop_fn(a.get(0, "fget")),
         _prop_fn(a.get(1, "fset")),
@@ -271,35 +314,35 @@ def _property(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("<property_getter>")
-def _property_getter(it: Interp, a: Args, site: Site) -> Vals:
+def _property_getter(_it: Host, a: Args, _site: Site) -> Vals:
     fn = _prop_fn(a.get(1))
     return frozenset(Property(fn, p.fset, p.fdel) for p in a.get(0) if isinstance(p, Property))
 
 
 @stub("<property_setter>")
-def _property_setter(it: Interp, a: Args, site: Site) -> Vals:
+def _property_setter(_it: Host, a: Args, _site: Site) -> Vals:
     fn = _prop_fn(a.get(1))
     return frozenset(Property(p.fget, fn, p.fdel) for p in a.get(0) if isinstance(p, Property))
 
 
 @stub("<property_deleter>")
-def _property_deleter(it: Interp, a: Args, site: Site) -> Vals:
+def _property_deleter(_it: Host, a: Args, _site: Site) -> Vals:
     fn = _prop_fn(a.get(1))
     return frozenset(Property(p.fget, p.fset, fn) for p in a.get(0) if isinstance(p, Property))
 
 
 @stub("object")
-def _object(it: Interp, a: Args, site: Site) -> Vals:
+def _object(_it: Host, _a: Args, _site: Site) -> Vals:
     return EMPTY
 
 
 @stub("type")
-def _type(it: Interp, a: Args, site: Site) -> Vals:
+def _type(_it: Host, _a: Args, _site: Site) -> Vals:
     return EMPTY
 
 
 @stub("type.__call__")
-def _type_call(it: Interp, a: Args, site: Site) -> Vals:
+def _type_call(it: Host, a: Args, site: Site) -> Vals:
     out = EMPTY
     for tok in a.get(0):
         if isinstance(tok, ClassObj):
@@ -308,12 +351,12 @@ def _type_call(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("object.__new__")
-def _object_new(it: Interp, a: Args, site: Site) -> Vals:
+def _object_new(_it: Host, a: Args, site: Site) -> Vals:
     return frozenset(Instance(t.cls, Alloc.of(site)) for t in a.get(0) if isinstance(t, ClassObj))
 
 
 @stub("object.__setattr__")
-def _object_setattr(it: Interp, a: Args, site: Site) -> Vals:
+def _object_setattr(it: Host, a: Args, site: Site) -> Vals:
     """Bypass custom __setattr__: dispatch to data descriptors on the target's MRO."""
     val = a.get(2)
     for obj in a.get(0):
@@ -328,7 +371,7 @@ def _object_setattr(it: Interp, a: Args, site: Site) -> Vals:
     return EMPTY
 
 
-def _apply_dataclass(it: Interp, cls_vals: Vals) -> Vals:
+def _apply_dataclass(it: Host, cls_vals: Vals) -> Vals:
     for t in cls_vals:
         if isinstance(t, ClassObj) and not it.readonly:
             if "__init__" not in it.state.class_attrs.get(t.cls, {}):
@@ -337,7 +380,7 @@ def _apply_dataclass(it: Interp, cls_vals: Vals) -> Vals:
 
 
 @stub("dataclasses.dataclass")
-def _dataclass(it: Interp, a: Args, site: Site) -> Vals:
+def _dataclass(it: Host, a: Args, _site: Site) -> Vals:
     cls = a.pos[0] if a.pos else EMPTY
     if any(isinstance(t, ClassObj) for t in cls):
         return _apply_dataclass(it, cls)
@@ -345,12 +388,12 @@ def _dataclass(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("<dataclass>")
-def _dataclass_deco(it: Interp, a: Args, site: Site) -> Vals:
+def _dataclass_deco(it: Host, a: Args, _site: Site) -> Vals:
     return _apply_dataclass(it, a.get(0))
 
 
 @stub("<dataclass_init>")
-def _dataclass_init(it: Interp, a: Args, site: Site) -> Vals:
+def _dataclass_init(it: Host, a: Args, site: Site) -> Vals:
     for obj in a.get(0):
         if isinstance(obj, Instance):
             post = it.state.lookup_class_attr(obj.cls, "__post_init__")
@@ -367,12 +410,12 @@ def _dataclass_init(it: Interp, a: Args, site: Site) -> Vals:
 
 @stub("tuple", "frozenset", "enumerate", "zip",
       "itertools.chain", "itertools.cycle", "itertools.islice")
-def _passthrough(it: Interp, a: Args, site: Site) -> Vals:
+def _passthrough(it: Host, a: Args, site: Site) -> Vals:
     return it.iterate(a.all(), site)
 
 
 def _container(kind: str) -> StubFn:
-    def fn(it: Interp, a: Args, site: Site) -> Vals:
+    def fn(it: Host, a: Args, site: Site) -> Vals:
         """list(xs) / set(xs) / dict(...): a new container (Box at this call) with the elements."""
         return it.iterate(a.all(), site) | frozenset([Box(kind, Alloc.of(site))])
     return fn
@@ -383,31 +426,31 @@ for _kind in ("list", "set", "dict"):
 
 
 @stub("<elements>")
-def _elements(it: Interp, a: Args, site: Site) -> Vals:
+def _elements(_it: Host, a: Args, _site: Site) -> Vals:
     """d.values() / d.items() / d.keys() / xs.copy() / xs.pop([i]) / d.pop(k[, default])."""
     return a.get(0) | union(a.pos[2:])  # receiver's elements (already deref'd) | default
 
 
 # ---------------------------------------------------------------- functools / itertools
 @stub("functools.reduce")
-def _reduce(it: Interp, a: Args, site: Site) -> Vals:
+def _reduce(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(1)
     return fold(it, a.get(0), elems | a.get(2, "initial"), elems, site)
 
 
 @stub("itertools.accumulate")
-def _accumulate(it: Interp, a: Args, site: Site) -> Vals:
+def _accumulate(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(0)
     return fold(it, a.get(1, "func"), elems | a.kw("initial"), elems, site)
 
 
 @stub("itertools.starmap")
-def _starmap(it: Interp, a: Args, site: Site) -> Vals:
+def _starmap(it: Host, a: Args, site: Site) -> Vals:
     return call(it, a.get(0), [], site, star=a.get(1))
 
 
 @stub("itertools.groupby")
-def _groupby(it: Interp, a: Args, site: Site) -> Vals:
+def _groupby(it: Host, a: Args, site: Site) -> Vals:
     elems = a.get(0)
     call(it, a.get(1, "key"), [elems], site)
     return elems
@@ -417,24 +460,24 @@ IDENTITY = Builtin("<identity>")
 
 
 @stub("<identity>")
-def _identity(it: Interp, a: Args, site: Site) -> Vals:
+def _identity(_it: Host, a: Args, _site: Site) -> Vals:
     return a.get(0)
 
 
 @stub("functools.cache", "functools.lru_cache")
-def _cache(it: Interp, a: Args, site: Site) -> Vals:
+def _cache(_it: Host, a: Args, _site: Site) -> Vals:
     """cache(f) / lru_cache(f) -> f;  lru_cache(maxsize=...) -> identity decorator."""
     f = a.pos[0] if a.pos else EMPTY
     return f if f else frozenset([IDENTITY])
 
 
 @stub("functools.wraps")
-def _wraps(it: Interp, a: Args, site: Site) -> Vals:
+def _wraps(_it: Host, _a: Args, _site: Site) -> Vals:
     return frozenset([IDENTITY])
 
 
 @stub("functools.update_wrapper")
-def _update_wrapper(it: Interp, a: Args, site: Site) -> Vals:
+def _update_wrapper(_it: Host, a: Args, _site: Site) -> Vals:
     return a.get(0)
 
 
@@ -444,7 +487,7 @@ def _shallow(v: Vals) -> Vals:
 
 
 @stub("functools.partial")
-def _partial(it: Interp, a: Args, site: Site) -> Vals:
+def _partial(_it: Host, a: Args, _site: Site) -> Vals:
     """partial(f, *args, **kws) -> <partial> token holding f and the bound args.
 
     A partial of a partial is flattened. Too many bound args (or */** at the
@@ -471,13 +514,13 @@ def _partial(it: Interp, a: Args, site: Site) -> Vals:
 
 
 @stub("<partial>")
-def _call_partial(it: Interp, a: Args, site: Site) -> Vals:
+def _call_partial(it: Host, a: Args, site: Site) -> Vals:
     # a.pos = [f, *bound args, *call args]; bound keywords are already merged into a.kws
     return it.apply(a.pos[0], a.pos[1:], a.star, a.kws, a.kwstar, site)
 
 
 @stub("<partial*>")
-def _call_partial_widened(it: Interp, a: Args, site: Site) -> Vals:
+def _call_partial_widened(it: Host, a: Args, site: Site) -> Vals:
     return it.apply(a.pos[0], [], a.rest(1), a.kws, a.kwstar, site)
 
 

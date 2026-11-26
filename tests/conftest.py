@@ -64,7 +64,7 @@ def _selection(config: pytest.Config, known: list[str]) -> tuple[list[str], list
     if unknown:
         raise pytest.UsageError(
             f"unknown test famil{'y' if len(unknown) == 1 else 'ies'}: {', '.join(unknown)}"
-            f" (known: {', '.join(known)}, or {ALL})")
+            + f" (known: {', '.join(known)}, or {ALL})")
 
     inc = set(known) if not include or ALL in include else set(include)
     exc = set(known) if ALL in exclude else set(exclude)
