@@ -11,9 +11,9 @@ import textwrap
 from callme import analyze_source
 
 
-def at(src: str, text: str) -> set[str]:
+def at(src: str, text: str, *, flow_sensitive: bool = True) -> set[str]:
     """Callees of the single call site whose source text is `text`."""
-    cg = analyze_source(textwrap.dedent(src), id_style="short")
+    cg = analyze_source(textwrap.dedent(src), id_style="short", flow_sensitive=flow_sensitive)
     sites = [s for s in cg.sites if s.text == text]
     assert len(sites) == 1, f"{text!r}: {len(sites)} call sites"
     return set(cg.targets(sites[0]))
@@ -214,7 +214,8 @@ def test_nonlocal_write_reaches_outer_function() -> None:
         return fn()
     outer()
     """
-    assert at(src, "fn()") == {"a", "b"}  # flow-insensitive: `a` is kept
+    assert at(src, "fn()") == {"b"}  # strong update on unconditional nonlocal write
+    assert at(src, "fn()", flow_sensitive=False) == {"a", "b"}
 
 
 def test_calling_a_container_is_harmless() -> None:

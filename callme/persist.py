@@ -43,7 +43,7 @@ from .model import (
 from .pipeline import Facts, PassState
 from .transfer import Env, State
 
-FORMAT, VERSION = "callme-state", 4  # v3: flow_sensitive; v4: module tokens
+FORMAT, VERSION = "callme-state", 5  # v3: flow_sensitive; v4: module tokens; v5: per-node writes
 
 Path = str | os.PathLike[str]
 
@@ -95,6 +95,7 @@ class StateDoc(TypedDict):
     inst_attrs: list[tuple[int, EnvDoc]]
     heap: list[tuple[int, Ids]]
     extern: list[tuple[str, EnvDoc]]
+    writes: list[tuple[int, list[tuple[str, EnvDoc]]]]
     bases: list[tuple[str, list[str]]]
     metaclasses: list[tuple[str, list[str]]]
 
@@ -211,6 +212,9 @@ def state_to_dict(state: State) -> StateDoc:
             "inst_attrs": [(enc.tok(i), enc.env(e)) for i, e in state.inst_attrs.items()],
             "heap": [(enc.tok(b), enc.toks(v)) for b, v in state.heap.items()],
             "extern": [(f.uid, enc.env(e)) for f, e in state.extern.items()],
+            "writes": [(enc.node(n), [(f.uid, enc.env(e))
+                                      for f, e in sorted(ws.items(), key=lambda p: p[0].uid)])
+                       for n, ws in state.writes.items()],
             "bases": [(c.uid, [b.uid for b in bs]) for c, bs in state.bases.items()],
             "metaclasses": [(c.uid, sorted(m.uid for m in ms))
                             for c, ms in state.metaclasses.items()]}
@@ -220,7 +224,7 @@ def state_from_dict(prog: Program, d: object) -> State:
     """Decode a `state_to_dict` document, such as one read with `json.load`, for `prog`.
 
     Function and class uids are resolved against `prog`. Raises `ValueError` if the header
-    is not "callme-state" version 4, if the document was produced for another program or
+    is not "callme-state" version 5, if the document was produced for another program or
     version of it (the fingerprints differ), or if a row is malformed or names an unknown
     id.
     """
@@ -331,6 +335,7 @@ def state_from_dict(prog: Program, d: object) -> State:
     state.inst_attrs = {get(i, Instance): env(e) for i, e in doc["inst_attrs"]}
     state.heap = {get(i, Box): toks(ids) for i, ids in doc["heap"]}
     state.extern = {func(f): env(e) for f, e in doc["extern"]}
+    state.writes = {get(i, Node): {func(f): env(e) for f, e in ws} for i, ws in doc["writes"]}
     state.bases = {cls(c): tuple(cls(b) for b in bs) for c, bs in doc["bases"]}
     state.metaclasses = {cls(c): {cls(m) for m in ms} for c, ms in doc["metaclasses"]}
     state.changed = False

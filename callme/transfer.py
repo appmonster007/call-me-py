@@ -16,9 +16,10 @@ run on copies of the env and are joined where they meet again; a loop repeats
 its body until the env at its head stops growing; `break` / `continue` /
 `return` / `raise` end their path. Everything other scopes read from a node
 (closures, default arguments, the docs) is its *summary*: the union of every
-value each local takes anywhere in the body, stored in `State.envs`. Locals
-written from inner scopes (`global` / `nonlocal`) stay flow-insensitive: any
-call may write them, so a read sees the local value joined with those writes.
+value each local takes anywhere in the body, stored in `State.envs`. Writes to
+enclosing scopes (`global` / `nonlocal`) are summarised per node in `State.writes`
+and applied back at call sites, with a strong update when every callee statically
+must-writes the variable.
 
 With `flow=False` a local is the union of all its bindings (weak updates) and
 the body is re-run until that union stops changing.
@@ -58,6 +59,7 @@ from .model import (
 from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUB_PACKAGES, STUBS, Args
 
 Env = dict[str, Vals]
+Writes = dict[FuncId, Env]  # owner function -> {name: values written by a node / its callees}
 Calls = list[tuple[Site, Node]]
 End = tuple[Env, bool]  # flow mode: env where a path ends, and whether a live path gets there
 
@@ -119,6 +121,7 @@ class State:
     inst_attrs: dict[Instance, Env]  # instance attributes per abstract object
     heap: dict[Box, Vals]  # what was stored into each container after its creation
     extern: dict[FuncId, Env]  # writes from other scopes: global / nonlocal, and `module.attr = v`
+    writes: dict[Node, Writes]  # per-node global / nonlocal / module-attr writes (incl. callees)
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
@@ -144,6 +147,7 @@ class State:
         self.inst_attrs = {}
         self.heap = {}
         self.extern = {}
+        self.writes = {}
         self.bases = {}
         self.metaclasses = {}
         self._mro_cache = {}
@@ -162,6 +166,7 @@ class State:
         new.inst_attrs = {i: dict(e) for i, e in self.inst_attrs.items()}
         new.heap = dict(self.heap)
         new.extern = {f: dict(e) for f, e in self.extern.items()}
+        new.writes = {n: {f: dict(e) for f, e in ws.items()} for n, ws in self.writes.items()}
         new.bases = dict(self.bases)
         new.metaclasses = {c: set(m) for c, m in self.metaclasses.items()}
         return new
@@ -172,8 +177,8 @@ class State:
                 and self.ret == other.ret and self.edges == other.edges
                 and self.entry == other.entry and self.class_attrs == other.class_attrs
                 and self.inst_attrs == other.inst_attrs and self.heap == other.heap
-                and self.extern == other.extern and self.bases == other.bases
-                and self.metaclasses == other.metaclasses)
+                and self.extern == other.extern and self.writes == other.writes
+                and self.bases == other.bases and self.metaclasses == other.metaclasses)
 
     def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
         """Join `vals` into attribute `name` of class `cls`, setting `changed` if it grew."""
@@ -209,6 +214,20 @@ class State:
         which `func`, a module body, then holds as a global.
         """
         env = self.extern.setdefault(func, {})
+        old = env.get(name, EMPTY)
+        if not vals <= old:
+            env[name] = old | vals
+            self.changed = True
+
+    def add_write(self, node: Node, func: FuncId, name: str, vals: Vals) -> None:
+        """Join `vals` into the side-effect writes of `node` to `(func, name)`.
+
+        Records `global`, `nonlocal` and module-attribute writes performed directly by `node`
+        or transitively by its callees, so callers in flow mode can apply them at call sites.
+        """
+        if not vals:
+            return
+        env = self.writes.setdefault(node, {}).setdefault(func, {})
         old = env.get(name, EMPTY)
         if not vals <= old:
             env[name] = old | vals
@@ -456,6 +475,7 @@ class Interp:
     live: bool  # flow mode: False after return / raise / break / continue (until a live path joins)
     loops: list[_LoopFrame]  # enclosing loops, innermost last
     tries: list[Env]  # enclosing try / with bodies: union of every state seen inside (may raise)
+    _weak_depth: int  # > 0 inside conditional expressions, stubs, or implicit calls: no strong kills
 
     def __init__(self, prog: Program, state: State, node: Node | None, *,
                  readonly: bool = False, func: FuncId | None = None) -> None:
@@ -479,6 +499,7 @@ class Interp:
         self.live = True
         self.loops = []
         self.tries = []
+        self._weak_depth = 0
 
     # ------------------------------------------------------------ names
     def bind(self, name: str, vals: Vals, *, weak: bool = False) -> None:
@@ -511,11 +532,16 @@ class Interp:
                 for acc in (self.summary, *self.tries):
                     acc[name] = acc.get(name, EMPTY) | vals
         elif vals and not self.readonly and name in self.info.globals:
-            self.state.add_extern(self.prog.module_body(self.info.id), name, vals)
+            owner = self.prog.module_body(self.info.id)
+            self.state.add_extern(owner, name, vals)
+            if self.flow and self.node is not None:
+                self.state.add_write(self.node, owner, name, vals)
         elif vals and not self.readonly and name in self.info.nonlocals:
             owner = self.nonlocal_owner(name)
             if owner is not None:
                 self.state.add_extern(owner, name, vals)
+                if self.flow and self.node is not None:
+                    self.state.add_write(self.node, owner, name, vals)
 
     def nonlocal_owner(self, name: str) -> FuncId | None:
         """Return the nearest enclosing function with local `name`, which `nonlocal name` writes."""
@@ -540,8 +566,6 @@ class Interp:
         if name in self.info.locals:
             if self.node is None:
                 return self.state.union_env(self.info.id, name)
-            if self.flow:  # inner scopes may have written it (global / nonlocal) during any call
-                return self.env.get(name, EMPTY) | self.state.extern.get(self.info.id, {}).get(name, EMPTY)
             return self.env.get(name, EMPTY)
         parent_node = self.node.ctx.parent if self.node is not None else None
         f = self.info.parent
@@ -566,18 +590,22 @@ class Interp:
         """
         fsets = EMPTY
         handled = False
-        for tok in cls_vals:
-            if isinstance(tok, Property) and tok.fset:
-                fsets |= tok.fset
-            elif isinstance(tok, Instance):
-                set_fn = self.state.lookup_class_attr(tok.cls, "__set__")
-                if set_fn:
-                    bound = frozenset(_bind_attr(f, tok.cls, tok) for f in set_fn)
-                    self.apply(bound, [frozenset([obj]), vals], None, {}, None, site)
-                    handled = True
-        if fsets:
-            self.apply(fsets, [frozenset([obj]), vals], None, {}, None, site)
-            handled = True
+        self._weak_depth += 1
+        try:
+            for tok in cls_vals:
+                if isinstance(tok, Property) and tok.fset:
+                    fsets |= tok.fset
+                elif isinstance(tok, Instance):
+                    set_fn = self.state.lookup_class_attr(tok.cls, "__set__")
+                    if set_fn:
+                        bound = frozenset(_bind_attr(f, tok.cls, tok) for f in set_fn)
+                        self.apply(bound, [frozenset([obj]), vals], None, {}, None, site)
+                        handled = True
+            if fsets:
+                self.apply(fsets, [frozenset([obj]), vals], None, {}, None, site)
+                handled = True
+        finally:
+            self._weak_depth -= 1
         return handled
 
     def set_attr(self, objs: Vals, attr: str, vals: Vals, site: Site) -> None:
@@ -593,7 +621,11 @@ class Interp:
                 setattr_fn = self.state.lookup_class_attr(t.cls, "__setattr__")
                 if setattr_fn:
                     bound = frozenset(_bind_attr(f, t.cls, t) for f in setattr_fn)
-                    self.apply(bound, [EMPTY, vals], None, {}, None, site)
+                    self._weak_depth += 1
+                    try:
+                        self.apply(bound, [EMPTY, vals], None, {}, None, site)
+                    finally:
+                        self._weak_depth -= 1
                     continue
                 cls_vals = self.state.lookup_class_attr(t.cls, attr)
                 if not self.invoke_data_descriptor_set(t, cls_vals, vals, site):
@@ -605,6 +637,8 @@ class Interp:
                 body = self.prog.modules[t.name].func
                 if body is not None:  # a namespace package has no globals of its own
                     self.state.add_extern(body, attr, vals)
+                    if self.flow and self.node is not None:
+                        self.state.add_write(self.node, body, attr, vals)
 
     def assign(self, t: ast.expr, vals: Vals) -> None:
         """Assign `vals` to an assignment target, following Python's forms of target.
@@ -662,17 +696,21 @@ class Interp:
         """
         found = False
         out = EMPTY
-        for t in recv:
-            if isinstance(t, Instance):
-                fn = self.state.lookup_class_attr(t.cls, name)
-                if fn:
+        self._weak_depth += 1
+        try:
+            for t in recv:
+                if isinstance(t, Instance):
+                    fn = self.state.lookup_class_attr(t.cls, name)
+                    if fn:
+                        found = True
+                        bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
+                        out |= self.apply(bound, pos, None, {}, None, site)
+                elif isinstance(t, Builtin) and f"{t.name}.{name}" in STUBS:
                     found = True
-                    bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
-                    out |= self.apply(bound, pos, None, {}, None, site)
-            elif isinstance(t, Builtin) and f"{t.name}.{name}" in STUBS:
-                found = True
-                out |= self.apply(frozenset([Builtin(f"{t.name}.{name}", t.bound, t.bound_kw)]),
-                                  pos, None, {}, None, site)
+                    out |= self.apply(frozenset([Builtin(f"{t.name}.{name}", t.bound, t.bound_kw)]),
+                                      pos, None, {}, None, site)
+        finally:
+            self._weak_depth -= 1
         return found, out
 
     def iterate(self, iterable: Vals, site: Site, *, is_async: bool = False) -> Vals:
@@ -685,16 +723,20 @@ class Interp:
         iter_name = "__aiter__" if is_async else "__iter__"
         next_name = "__anext__" if is_async else "__next__"
         out = EMPTY
-        for t in iterable:
-            if isinstance(t, Instance):
-                it_fn = self.state.lookup_class_attr(t.cls, iter_name)
-                if it_fn:
-                    bound = frozenset(_bind_attr(f, t.cls, t) for f in it_fn)
-                    iters = self.apply(bound, [], None, {}, None, site)
-                    _, elem = self.invoke_dunder(iters, next_name, [], site)
-                    out |= elem
-                    continue
-            out |= self.state.deref(frozenset([t]))
+        self._weak_depth += 1
+        try:
+            for t in iterable:
+                if isinstance(t, Instance):
+                    it_fn = self.state.lookup_class_attr(t.cls, iter_name)
+                    if it_fn:
+                        bound = frozenset(_bind_attr(f, t.cls, t) for f in it_fn)
+                        iters = self.apply(bound, [], None, {}, None, site)
+                        _, elem = self.invoke_dunder(iters, next_name, [], site)
+                        out |= elem
+                        continue
+                out |= self.state.deref(frozenset([t]))
+        finally:
+            self._weak_depth -= 1
         return out
 
     def _iter_expr(self, expr: ast.expr, *, is_async: bool = False) -> Vals:
@@ -782,19 +824,84 @@ class Interp:
         allocated at `site`. Each created instance of the class then has `__init__` called with
         the same arguments.
         """
-        new_fn = self.state.lookup_class_attr(tok.cls, "__new__")
-        if new_fn:
-            bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
-            created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
-        else:
-            created = frozenset([Instance(tok.cls, Alloc.of(site))])
-        for obj in created:
-            if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
-                init = self.state.lookup_class_attr(obj.cls, "__init__")
-                if init:
-                    bound_init = frozenset(_bind_attr(t, obj.cls, obj) for t in init)
-                    self.apply(bound_init, pos, star, kws, kwstar, site)
-        return created
+        self._weak_depth += 1
+        try:
+            new_fn = self.state.lookup_class_attr(tok.cls, "__new__")
+            if new_fn:
+                bound_new = frozenset(_bind_attr(t, tok.cls, tok) for t in new_fn)
+                created = self.apply(bound_new, [frozenset([tok]), *pos], star, kws, kwstar, site)
+            else:
+                created = frozenset([Instance(tok.cls, Alloc.of(site))])
+            for obj in created:
+                if isinstance(obj, Instance) and tok.cls in self.state.mro(obj.cls):
+                    init = self.state.lookup_class_attr(obj.cls, "__init__")
+                    if init:
+                        bound_init = frozenset(_bind_attr(t, obj.cls, obj) for t in init)
+                        self.apply(bound_init, pos, star, kws, kwstar, site)
+            return created
+        finally:
+            self._weak_depth -= 1
+
+    def _closure_owns_local(self, tok: Closure, name: str) -> bool:
+        """Return True if `nonlocal name` in closure `tok` refers to `self.node`'s own local."""
+        f = self.prog.funcs[tok.func].parent
+        pnode = tok.parent
+        while f is not None and self.prog.funcs[f].kind != "module":
+            if name in self.prog.funcs[f].locals:
+                return f == self.info.id and pnode is not None and pnode == self.node
+            f = self.prog.funcs[f].parent
+            pnode = pnode.ctx.parent if pnode is not None else None
+        return False
+
+    def _must_kills_for_closure(self, tok: Closure) -> frozenset[str]:
+        """Return locals of `self.info.id` that closure `tok` definitely overwrites on return."""
+        finfo = self.prog.funcs[tok.func]
+        if not finfo.must_writes:
+            return frozenset()
+        kills: set[str] = set()
+        for name in finfo.must_writes:
+            if name in finfo.globals:
+                if self.prog.module_body(tok.func) == self.info.id:
+                    kills.add(name)
+            elif name in finfo.nonlocals and self._closure_owns_local(tok, name):
+                kills.add(name)
+        return frozenset(kills)
+
+    def _apply_writes(self, writes: Mapping[FuncId, Env],
+                      kills: frozenset[str] = frozenset()) -> None:
+        """Apply callee side-effect `writes` to `self.env` (strong for `kills`) and propagate.
+
+        Writes targeting `self.info.id` update `self.env`, `self.summary` and `self.tries`.
+        Writes targeting other scopes—or targeting `self.info.id` without a guaranteed kill on a
+        non-module function, which may belong to an outer recursive activation—are propagated to
+        `State.writes[self.node]`.
+        """
+        own = writes.get(self.info.id)
+        if self.flow:
+            for name in kills:
+                vals = own.get(name, EMPTY) if own else EMPTY
+                if vals:
+                    self.env[name] = vals
+                    for acc in (self.summary, *self.tries):
+                        acc[name] = acc.get(name, EMPTY) | vals
+                else:
+                    self.env.pop(name, None)
+            if own:
+                for name, vals in own.items():
+                    if name not in kills and vals:
+                        self.env[name] = self.env.get(name, EMPTY) | vals
+                        for acc in (self.summary, *self.tries):
+                            acc[name] = acc.get(name, EMPTY) | vals
+        if self.flow and not self.readonly and self.node is not None:
+            for owner, env in writes.items():
+                if owner == self.info.id:
+                    if self.info.kind != "module":
+                        for name, vals in env.items():
+                            if name not in kills:
+                                self.state.add_write(self.node, owner, name, vals)
+                else:
+                    for name, vals in env.items():
+                        self.state.add_write(self.node, owner, name, vals)
 
     def apply(self, callee: Vals, pos: Sequence[Vals], star: Vals | None,
               kws: Mapping[str, Vals], kwstar: Vals | None, site: Site) -> Vals:
@@ -812,61 +919,91 @@ class Interp:
         StaticMethod its function is called unbound
 
         Other tokens, modules among them, are not callable and are skipped. In read-only mode
-        no context is registered and no edge is recorded.
+        no context is registered and no edge is recorded. In flow mode, side-effect writes from
+        `State.writes` are applied back to `self.env` (strongly when every matching closure
+        statically must-writes the variable) and propagated to `State.writes[self.node]`.
 
         star    values passed through `*args`, or None when the call has no `*` argument
         kwstar  values passed through `**kwargs`, or None when the call has no `**` argument
         """
         out = EMPTY
-        for tok in callee:
-            if isinstance(tok, Builtin):
-                fn = STUBS.get(tok.name)
-                if fn is not None:  # stubs read their arguments as elements
-                    d = self.state.deref
-                    args = Args([d(v) for v in (*tok.bound, *pos)],
-                                None if star is None else d(star),
-                                {k: d(v) for k, v in {**dict(tok.bound_kw), **kws}.items()},
-                                None if kwstar is None else d(kwstar))
-                    out |= fn(self, args, site)
-                continue
-            if isinstance(tok, BoundMethod):
-                out |= self.apply(frozenset([tok.func]), [frozenset([tok.receiver]), *pos],
-                                  star, kws, kwstar, site)
-                continue
-            if isinstance(tok, ClassObj):
-                metas = self.state.get_metaclasses(tok.cls)
-                meta_calls: set[Token] = set()
-                for m in metas:
-                    for fn in self.state.lookup_class_attr(m, "__call__"):
-                        if isinstance(fn, Closure):
-                            meta_calls.add(BoundMethod(fn, tok))
-                        else:
-                            meta_calls.add(_bind_attr(fn, m, tok))
-                if meta_calls:
-                    out |= self.apply(frozenset(meta_calls), pos, star, kws, kwstar, site)
+        all_closures = bool(callee) and all(isinstance(t, Closure) for t in callee)
+        can_kill = (self.flow and not self.readonly and self._weak_depth == 0
+                    and self.node is not None and not self.node.ctx.merged)
+        collected_writes: Writes = {}
+        kills: set[str] | None = None
+        guard_poly = not all_closures and len(callee) > 1
+        if guard_poly:
+            self._weak_depth += 1
+        try:
+            for tok in callee:
+                if isinstance(tok, Builtin):
+                    fn = STUBS.get(tok.name)
+                    if fn is not None:  # stubs read their arguments as elements
+                        d = self.state.deref
+                        args = Args([d(v) for v in (*tok.bound, *pos)],
+                                    None if star is None else d(star),
+                                    {k: d(v) for k, v in {**dict(tok.bound_kw), **kws}.items()},
+                                    None if kwstar is None else d(kwstar))
+                        self._weak_depth += 1
+                        try:
+                            out |= fn(self, args, site)
+                        finally:
+                            self._weak_depth -= 1
+                    continue
+                if isinstance(tok, BoundMethod):
+                    out |= self.apply(frozenset([tok.func]), [frozenset([tok.receiver]), *pos],
+                                      star, kws, kwstar, site)
+                    continue
+                if isinstance(tok, ClassObj):
+                    metas = self.state.get_metaclasses(tok.cls)
+                    meta_calls: set[Token] = set()
+                    for m in metas:
+                        for fn in self.state.lookup_class_attr(m, "__call__"):
+                            if isinstance(fn, Closure):
+                                meta_calls.add(BoundMethod(fn, tok))
+                            else:
+                                meta_calls.add(_bind_attr(fn, m, tok))
+                    if meta_calls:
+                        out |= self.apply(frozenset(meta_calls), pos, star, kws, kwstar, site)
+                    else:
+                        out |= self.instantiate(tok, pos, star, kws, kwstar, site)
+                    continue
+                if isinstance(tok, StaticMethod):
+                    out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
+                    continue
+                if isinstance(tok, Instance):
+                    call_fn = self.state.lookup_class_attr(tok.cls, "__call__")
+                    if call_fn:
+                        bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
+                        out |= self.apply(bound_call, pos, star, kws, kwstar, site)
+                    continue
+                if isinstance(tok, (ClassMethod, Super, Property, Box, Module)):
+                    continue
+                params = self.bind_args(tok, pos, star, kws, kwstar)
+                if params is None:
+                    continue
+                if self.readonly:
+                    target = Node(tok.func, Ctx(params, tok.parent))
                 else:
-                    out |= self.instantiate(tok, pos, star, kws, kwstar, site)
-                continue
-            if isinstance(tok, StaticMethod):
-                out |= self.apply(frozenset([tok.func]), pos, star, kws, kwstar, site)
-                continue
-            if isinstance(tok, Instance):
-                call_fn = self.state.lookup_class_attr(tok.cls, "__call__")
-                if call_fn:
-                    bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
-                    out |= self.apply(bound_call, pos, star, kws, kwstar, site)
-                continue
-            if isinstance(tok, (ClassMethod, Super, Property, Box, Module)):
-                continue
-            params = self.bind_args(tok, pos, star, kws, kwstar)
-            if params is None:
-                continue
-            if self.readonly:
-                target = Node(tok.func, Ctx(params, tok.parent))
-            else:
-                target = self.state.resolve(tok.func, params, tok.parent)
-                self.calls.append((site, target))
-            out |= self.state.ret.get(target, EMPTY)
+                    target = self.state.resolve(tok.func, params, tok.parent)
+                    self.calls.append((site, target))
+                    if self.flow:
+                        tw = self.state.writes.get(target)
+                        if tw:
+                            for owner, env in tw.items():
+                                dst = collected_writes.setdefault(owner, {})
+                                for name, vals in env.items():
+                                    dst[name] = dst.get(name, EMPTY) | vals
+                        if can_kill and all_closures:
+                            tk = self._must_kills_for_closure(tok)
+                            kills = set(tk) if kills is None else (kills & tk)
+                out |= self.state.ret.get(target, EMPTY)
+        finally:
+            if guard_poly:
+                self._weak_depth -= 1
+        if collected_writes or kills:
+            self._apply_writes(collected_writes, frozenset(kills) if kills else frozenset())
         return out
 
     # ------------------------------------------------------------ expressions
@@ -964,13 +1101,22 @@ class Interp:
     def e_IfExp(self, e: ast.IfExp) -> Vals:
         """Evaluate `a if c else b`: the test for its calls, then the union of both branches."""
         self.eval(e.test)
-        return self.eval(e.body) | self.eval(e.orelse)
+        self._weak_depth += 1
+        try:
+            return self.eval(e.body) | self.eval(e.orelse)
+        finally:
+            self._weak_depth -= 1
 
     def e_BoolOp(self, e: ast.BoolOp) -> Vals:
         """Evaluate `and` or `or`: the union of all operands, since any may be the result."""
-        out = EMPTY
-        for v in e.values:
-            out |= self.eval(v)
+        out = self.eval(e.values[0]) if e.values else EMPTY
+        if len(e.values) > 1:
+            self._weak_depth += 1
+            try:
+                for v in e.values[1:]:
+                    out |= self.eval(v)
+            finally:
+                self._weak_depth -= 1
         return out
 
     def e_NamedExpr(self, e: ast.NamedExpr) -> Vals:
@@ -1022,18 +1168,22 @@ class Interp:
         site = make_site(self.info.id, e, "op")
         out = EMPTY
         rest: set[Token] = set()
-        for t in val:
-            if isinstance(t, Instance):
-                fn = self.state.lookup_class_attr(t.cls, "__getitem__")
-                if fn:
-                    bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
-                    out |= self.apply(bound, [slc], None, {}, None, site)
+        self._weak_depth += 1
+        try:
+            for t in val:
+                if isinstance(t, Instance):
+                    fn = self.state.lookup_class_attr(t.cls, "__getitem__")
+                    if fn:
+                        bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
+                        out |= self.apply(bound, [slc], None, {}, None, site)
+                        continue
+                elif isinstance(t, Builtin) and f"{t.name}.__getitem__" in STUBS:
+                    out |= self.apply(frozenset([Builtin(f"{t.name}.__getitem__", t.bound, t.bound_kw)]),
+                                      [slc], None, {}, None, site)
                     continue
-            elif isinstance(t, Builtin) and f"{t.name}.__getitem__" in STUBS:
-                out |= self.apply(frozenset([Builtin(f"{t.name}.__getitem__", t.bound, t.bound_kw)]),
-                                  [slc], None, {}, None, site)
-                continue
-            rest.add(t)
+                rest.add(t)
+        finally:
+            self._weak_depth -= 1
         return out | self.state.deref(frozenset(rest))
 
     def e_BinOp(self, e: ast.BinOp) -> Vals:
@@ -1075,17 +1225,23 @@ class Interp:
         """
         left = self.eval(e.left)
         site = make_site(self.info.id, e, "op")
-        for op, comp in zip(e.ops, e.comparators):
-            right = self.eval(comp)
-            if isinstance(op, (ast.In, ast.NotIn)):
-                self.invoke_dunder(right, "__contains__", [left], site)
-            else:
-                spec = CMP_DUNDERS.get(type(op))
-                if spec is not None:
-                    found, _ = self.invoke_dunder(left, spec[0], [right], site)
-                    if not found:
-                        self.invoke_dunder(right, spec[1], [left], site)
-            left = right
+        for i, (op, comp) in enumerate(zip(e.ops, e.comparators)):
+            if i > 0:
+                self._weak_depth += 1
+            try:
+                right = self.eval(comp)
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    self.invoke_dunder(right, "__contains__", [left], site)
+                else:
+                    spec = CMP_DUNDERS.get(type(op))
+                    if spec is not None:
+                        found, _ = self.invoke_dunder(left, spec[0], [right], site)
+                        if not found:
+                            self.invoke_dunder(right, spec[1], [left], site)
+                left = right
+            finally:
+                if i > 0:
+                    self._weak_depth -= 1
         return EMPTY
 
     def e_FormattedValue(self, e: ast.FormattedValue) -> Vals:
@@ -1151,96 +1307,100 @@ class Interp:
         """
         out: set[Token] = set()
         site = make_site(self.info.id, e, "attr")
-        for t in v:
-            if isinstance(t, Builtin):
-                full = f"{t.name}.{e.attr}"
-                if full in STUBS or full in STUB_MODULES or full in STUB_PACKAGES:
-                    out.add(Builtin(full, t.bound, t.bound_kw))
-                elif t.name == "builtins" and e.attr in BUILTIN_NAMES:
-                    out.add(Builtin(e.attr))
-            elif isinstance(t, Module):
-                out.update(self.module_attr(t.name, e.attr))
-            elif isinstance(t, Property):
-                if e.attr in ("getter", "setter", "deleter"):
-                    out.add(Builtin(f"<property_{e.attr}>", (frozenset([t]),)))
-                elif e.attr == "fget":
-                    out.update(t.fget)
-                elif e.attr == "fset":
-                    out.update(t.fset)
-                elif e.attr == "fdel":
-                    out.update(t.fdel)
-            elif isinstance(t, ClassObj):
-                cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
-                for attr_tok in cls_vals:
-                    if isinstance(attr_tok, Instance):
-                        get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
-                        if get_fn:
-                            bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
-                            out.update(self.apply(bound, [EMPTY, frozenset([t])], None, {}, None, site))
-                            continue
-                    out.add(_bind_attr(attr_tok, t.cls, t))
-                if not self.state.has_class_attr(t.cls, e.attr):
-                    for m in self.state.get_metaclasses(t.cls):
-                        for attr_tok in self.state.lookup_class_attr(m, e.attr):
-                            if isinstance(attr_tok, Closure):
-                                out.add(BoundMethod(attr_tok, t))
-                            else:
-                                out.add(_bind_attr(attr_tok, m, t))
-            elif isinstance(t, Instance):
-                out.update(self.state.inst_attrs.get(t, {}).get(e.attr, EMPTY))
-                cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
-                fgets = EMPTY
-                for attr_tok in cls_vals:
-                    if isinstance(attr_tok, Property):
-                        fgets |= attr_tok.fget
-                    elif isinstance(attr_tok, Instance):
-                        get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
-                        if get_fn:
-                            bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
-                            out.update(self.apply(
-                                bound, [frozenset([t]), frozenset([ClassObj(t.cls)])],
-                                None, {}, None, site))
-                        else:
-                            out.add(attr_tok)
-                    else:
+        self._weak_depth += 1
+        try:
+            for t in v:
+                if isinstance(t, Builtin):
+                    full = f"{t.name}.{e.attr}"
+                    if full in STUBS or full in STUB_MODULES or full in STUB_PACKAGES:
+                        out.add(Builtin(full, t.bound, t.bound_kw))
+                    elif t.name == "builtins" and e.attr in BUILTIN_NAMES:
+                        out.add(Builtin(e.attr))
+                elif isinstance(t, Module):
+                    out.update(self.module_attr(t.name, e.attr))
+                elif isinstance(t, Property):
+                    if e.attr in ("getter", "setter", "deleter"):
+                        out.add(Builtin(f"<property_{e.attr}>", (frozenset([t]),)))
+                    elif e.attr == "fget":
+                        out.update(t.fget)
+                    elif e.attr == "fset":
+                        out.update(t.fset)
+                    elif e.attr == "fdel":
+                        out.update(t.fdel)
+                elif isinstance(t, ClassObj):
+                    cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
+                    for attr_tok in cls_vals:
+                        if isinstance(attr_tok, Instance):
+                            get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
+                            if get_fn:
+                                bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
+                                out.update(self.apply(bound, [EMPTY, frozenset([t])], None, {}, None, site))
+                                continue
                         out.add(_bind_attr(attr_tok, t.cls, t))
-                if fgets:
-                    out.update(self.apply(fgets, [frozenset([t])], None, {}, None, site))
-                if not self._has_instance_attr(t, e.attr):
-                    getattr_fn = self.state.lookup_class_attr(t.cls, "__getattr__")
-                    if getattr_fn:
-                        bound = frozenset(_bind_attr(f, t.cls, t) for f in getattr_fn)
-                        out.update(self.apply(bound, [EMPTY], None, {}, None, site))
-            elif isinstance(t, Super):
-                if isinstance(t.receiver, ClassObj) and t.start not in self.state.mro(t.receiver.cls):
-                    # Metaclass super(Meta, Cls): walk Cls's metaclass MRO after Meta
-                    metas = self.state.get_metaclasses(t.receiver.cls)
-                    found_any = False
-                    for m in metas:
-                        found = self.state.lookup_class_attr(m, e.attr, after=t.start)
-                        if found:
-                            found_any = True
-                            for attr_tok in found:
+                    if not self.state.has_class_attr(t.cls, e.attr):
+                        for m in self.state.get_metaclasses(t.cls):
+                            for attr_tok in self.state.lookup_class_attr(m, e.attr):
                                 if isinstance(attr_tok, Closure):
-                                    out.add(BoundMethod(attr_tok, t.receiver))
+                                    out.add(BoundMethod(attr_tok, t))
                                 else:
-                                    out.add(_bind_attr(attr_tok, m, t.receiver))
-                    if not found_any:
-                        if e.attr == "__call__":
-                            out.add(Builtin("type.__call__", (frozenset([t.receiver]),)))
+                                    out.add(_bind_attr(attr_tok, m, t))
+                elif isinstance(t, Instance):
+                    out.update(self.state.inst_attrs.get(t, {}).get(e.attr, EMPTY))
+                    cls_vals = self.state.lookup_class_attr(t.cls, e.attr)
+                    fgets = EMPTY
+                    for attr_tok in cls_vals:
+                        if isinstance(attr_tok, Property):
+                            fgets |= attr_tok.fget
+                        elif isinstance(attr_tok, Instance):
+                            get_fn = self.state.lookup_class_attr(attr_tok.cls, "__get__")
+                            if get_fn:
+                                bound = frozenset(_bind_attr(f, attr_tok.cls, attr_tok) for f in get_fn)
+                                out.update(self.apply(
+                                    bound, [frozenset([t]), frozenset([ClassObj(t.cls)])],
+                                    None, {}, None, site))
+                            else:
+                                out.add(attr_tok)
+                        else:
+                            out.add(_bind_attr(attr_tok, t.cls, t))
+                    if fgets:
+                        out.update(self.apply(fgets, [frozenset([t])], None, {}, None, site))
+                    if not self._has_instance_attr(t, e.attr):
+                        getattr_fn = self.state.lookup_class_attr(t.cls, "__getattr__")
+                        if getattr_fn:
+                            bound = frozenset(_bind_attr(f, t.cls, t) for f in getattr_fn)
+                            out.update(self.apply(bound, [EMPTY], None, {}, None, site))
+                elif isinstance(t, Super):
+                    if isinstance(t.receiver, ClassObj) and t.start not in self.state.mro(t.receiver.cls):
+                        # Metaclass super(Meta, Cls): walk Cls's metaclass MRO after Meta
+                        metas = self.state.get_metaclasses(t.receiver.cls)
+                        found_any = False
+                        for m in metas:
+                            found = self.state.lookup_class_attr(m, e.attr, after=t.start)
+                            if found:
+                                found_any = True
+                                for attr_tok in found:
+                                    if isinstance(attr_tok, Closure):
+                                        out.add(BoundMethod(attr_tok, t.receiver))
+                                    else:
+                                        out.add(_bind_attr(attr_tok, m, t.receiver))
+                        if not found_any:
+                            if e.attr == "__call__":
+                                out.add(Builtin("type.__call__", (frozenset([t.receiver]),)))
+                            elif e.attr == "__new__":
+                                out.add(Builtin("object.__new__"))
+                            elif e.attr == "__setattr__":
+                                out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
+                    else:
+                        found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
+                        if found:
+                            for attr_tok in found:
+                                out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
                         elif e.attr == "__new__":
                             out.add(Builtin("object.__new__"))
                         elif e.attr == "__setattr__":
                             out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
-                else:
-                    found = self.state.lookup_class_attr(t.receiver.cls, e.attr, after=t.start)
-                    if found:
-                        for attr_tok in found:
-                            out.add(_bind_attr(attr_tok, t.receiver.cls, t.receiver))
-                    elif e.attr == "__new__":
-                        out.add(Builtin("object.__new__"))
-                    elif e.attr == "__setattr__":
-                        out.add(Builtin("object.__setattr__", (frozenset([t.receiver]),)))
+        finally:
+            self._weak_depth -= 1
         if e.attr in METHOD_STUBS and not out:  # xs.sort(key=...), d.get(k, default)
             out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
         return frozenset(out)
@@ -1269,10 +1429,20 @@ class Interp:
                 for n in ast.walk(g.target):
                     if isinstance(n, ast.Name):
                         saved.setdefault(n.id, self.env.get(n.id))
-        for g in gens:
-            self.assign(g.target, self._iter_expr(g.iter, is_async=bool(g.is_async)))
-            for c in g.ifs:
-                self.eval(c)
+        for i, g in enumerate(gens):
+            if i > 0:
+                self._weak_depth += 1
+            try:
+                self.assign(g.target, self._iter_expr(g.iter, is_async=bool(g.is_async)))
+                self._weak_depth += 1
+                try:
+                    for c in g.ifs:
+                        self.eval(c)
+                finally:
+                    self._weak_depth -= 1
+            finally:
+                if i > 0:
+                    self._weak_depth -= 1
         return saved
 
     def _end_comp(self, saved: dict[str, Vals | None]) -> None:
@@ -1286,7 +1456,11 @@ class Interp:
     def e_GeneratorExp(self, e: ast.ListComp | ast.SetComp | ast.GeneratorExp) -> Vals:
         """Evaluate a generator expression, or a list or set comprehension's body: its elements."""
         saved = self._comp(e.generators)
-        out = self.eval(e.elt)
+        self._weak_depth += 1
+        try:
+            out = self.eval(e.elt)
+        finally:
+            self._weak_depth -= 1
         self._end_comp(saved)
         return out
 
@@ -1301,8 +1475,12 @@ class Interp:
     def e_DictComp(self, e: ast.DictComp) -> Vals:
         """Evaluate a dict comprehension: its values plus a new dict `Box`."""
         saved = self._comp(e.generators)
-        self.eval(e.key)
-        out = self.eval(e.value)
+        self._weak_depth += 1
+        try:
+            self.eval(e.key)
+            out = self.eval(e.value)
+        finally:
+            self._weak_depth -= 1
         self._end_comp(saved)
         return out | self.new_box("dict", e)
 
@@ -1619,6 +1797,16 @@ class Interp:
         if s.value is not None:
             self.assign(s.target, self.eval(s.value))
 
+    def s_Assert(self, s: ast.Assert) -> None:
+        """Evaluate `assert test, msg`; `msg` runs only on failure so its effects stay weak."""
+        self.eval(s.test)
+        if s.msg is not None:
+            self._weak_depth += 1
+            try:
+                self.eval(s.msg)
+            finally:
+                self._weak_depth -= 1
+
     def s_Delete(self, s: ast.Delete) -> None:
         """Run `del` on each target, calling the special methods involved.
 
@@ -1628,20 +1816,24 @@ class Interp:
         for t in s.targets:
             if isinstance(t, ast.Attribute):
                 site = make_site(self.info.id, t, "attr")
-                for obj in self.eval(t.value):
-                    if isinstance(obj, Instance):
-                        cls_vals = self.state.lookup_class_attr(obj.cls, t.attr)
-                        fdels = EMPTY
-                        for tok in cls_vals:
-                            if isinstance(tok, Property) and tok.fdel:
-                                fdels |= tok.fdel
-                            elif isinstance(tok, Instance):
-                                del_fn = self.state.lookup_class_attr(tok.cls, "__delete__")
-                                if del_fn:
-                                    bound = frozenset(_bind_attr(f, tok.cls, tok) for f in del_fn)
-                                    self.apply(bound, [frozenset([obj])], None, {}, None, site)
-                        if fdels:
-                            self.apply(fdels, [frozenset([obj])], None, {}, None, site)
+                self._weak_depth += 1
+                try:
+                    for obj in self.eval(t.value):
+                        if isinstance(obj, Instance):
+                            cls_vals = self.state.lookup_class_attr(obj.cls, t.attr)
+                            fdels = EMPTY
+                            for tok in cls_vals:
+                                if isinstance(tok, Property) and tok.fdel:
+                                    fdels |= tok.fdel
+                                elif isinstance(tok, Instance):
+                                    del_fn = self.state.lookup_class_attr(tok.cls, "__delete__")
+                                    if del_fn:
+                                        bound = frozenset(_bind_attr(f, tok.cls, tok) for f in del_fn)
+                                        self.apply(bound, [frozenset([obj])], None, {}, None, site)
+                            if fdels:
+                                self.apply(fdels, [frozenset([obj])], None, {}, None, site)
+                finally:
+                    self._weak_depth -= 1
             elif isinstance(t, ast.Subscript):
                 slc = self.eval(t.slice)
                 obj = self.eval(t.value)
@@ -1715,7 +1907,12 @@ class Interp:
         for i in range(1, len(parts) + 1):
             info = self.prog.modules.get(".".join(parts[:i]))
             if info is not None and info.func is not None:
-                self.state.register(Node(info.func, Ctx()))
+                mod_node = Node(info.func, Ctx())
+                self.state.register(mod_node)
+                if self.flow:
+                    mw = self.state.writes.get(mod_node)
+                    if mw:
+                        self._apply_writes(mw)
 
     def module_attr(self, name: str, attr: str) -> Vals:
         """Return attribute `attr` of program module `name`: one of its globals, or a submodule.
@@ -1831,7 +2028,7 @@ def analyze(node: Node, state: State, prog: Program,
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)
     known = state.envs.get(node, {}) if env is None else env
-    if state.flow:  # extern writes are read at each lookup; `known` only joins the summary
+    if state.flow:  # callee writes are applied at call sites; `known` only joins the summary
         it.summary = join_envs([it.env, state.extern.get(node.func, {}), known])
         it.run()
         return it.summary, it.ret, it.calls

@@ -62,6 +62,7 @@ class FuncInfo:
     owner      class whose body defines the function directly, or None
     globals    names declared `global`, which are written in the module
     nonlocals  names declared `nonlocal`, which are written in an enclosing function
+    must_writes  subset of `globals | nonlocals` assigned on every normal return path
     """
 
     id: FuncId
@@ -74,6 +75,7 @@ class FuncInfo:
     owner: ClassId | None = None  # lexically enclosing class, if defined in a class body
     globals: frozenset[str] = frozenset()  # names declared `global` (written in the module)
     nonlocals: frozenset[str] = frozenset()  # names declared `nonlocal` (written in an outer def)
+    must_writes: frozenset[str] = frozenset()  # globals / nonlocals assigned on every normal return
 
 
 @dataclass(eq=False)
@@ -249,6 +251,162 @@ def scope_decls(body: Iterable[ast.AST]) -> tuple[frozenset[str], frozenset[str]
     return frozenset(glob), frozenset(nonloc)
 
 
+def _target_names(t: ast.expr, tracked: frozenset[str]) -> set[str]:
+    """Return names in `tracked` directly bound by assignment target `t`."""
+    if isinstance(t, ast.Name):
+        return {t.id} if t.id in tracked else set()
+    if isinstance(t, (ast.Tuple, ast.List)):
+        out: set[str] = set()
+        for elt in t.elts:
+            out.update(_target_names(elt, tracked))
+        return out
+    if isinstance(t, ast.Starred):
+        return _target_names(t.value, tracked)
+    return set()
+
+
+def _stmt_writes(s: ast.stmt, tracked: frozenset[str]) -> set[str]:
+    """Return names in `tracked` unconditionally assigned by simple statement `s`."""
+    if isinstance(s, ast.Assign):
+        out: set[str] = set()
+        for t in s.targets:
+            out.update(_target_names(t, tracked))
+        return out
+    if isinstance(s, ast.AnnAssign):
+        return _target_names(s.target, tracked) if s.value is not None else set()
+    if isinstance(s, FUNC_NODES + (ast.ClassDef,)):
+        return {s.name} if s.name in tracked else set()
+    if isinstance(s, (ast.Import, ast.ImportFrom)):
+        return {n for a in s.names if a.name != "*"
+                and (n := a.asname or a.name.split(".")[0]) in tracked}
+    return set()
+
+
+def _all_deletes(stmts: Sequence[ast.stmt], tracked: frozenset[str]) -> frozenset[str]:
+    """Return every name in `tracked` deleted anywhere in `stmts` (within the same scope)."""
+    return frozenset(
+        t.id for n in walk_scope(stmts) if isinstance(n, ast.Delete)
+        for t in n.targets if isinstance(t, ast.Name) and t.id in tracked
+    )
+
+
+def _is_irrefutable(pat: ast.pattern) -> bool:
+    """Return True if match pattern `pat` always matches any subject."""
+    if isinstance(pat, ast.MatchAs):
+        return pat.pattern is None
+    if isinstance(pat, ast.MatchOr):
+        return any(_is_irrefutable(p) for p in pat.patterns)
+    return False
+
+
+def scope_must_writes(node: ast.AST, body: Sequence[ast.AST],
+                      tracked: frozenset[str]) -> frozenset[str]:
+    """Return names in `tracked` that `node` definitely assigns on every normal-return path.
+
+    Async functions and generators return empty, because calling them does not execute their
+    body immediately. Loops, `with` blocks and `try` handlers are treated conservatively so
+    the result is always a sound under-approximation of guaranteed writes.
+    """
+    if not tracked or not isinstance(node, ast.FunctionDef):
+        return frozenset()
+    if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in walk_scope(body)):
+        return frozenset()
+    stmts = [s for s in body if isinstance(s, ast.stmt)]
+    returns: list[frozenset[str]] = []
+    loop_breaks: list[list[frozenset[str]]] = []
+
+    def intersect(sets: Sequence[frozenset[str]]) -> frozenset[str]:
+        """Return the intersection of non-empty sequence `sets`."""
+        return frozenset.intersection(*sets)
+
+    def walk(seq: Sequence[ast.stmt], cur: frozenset[str]) -> tuple[frozenset[str], bool]:
+        """Return (must-written set at fallthrough, whether fallthrough is reachable)."""
+        for s in seq:
+            if isinstance(s, ast.Return):
+                returns.append(cur)
+                return cur, False
+            if isinstance(s, ast.Raise):
+                return cur, False
+            if isinstance(s, ast.Break):
+                if loop_breaks:
+                    loop_breaks[-1].append(cur)
+                return cur, False
+            if isinstance(s, ast.Continue):
+                return cur, False
+            if isinstance(s, ast.If):
+                m1, l1 = walk(s.body, cur)
+                m2, l2 = walk(s.orelse, cur)
+                live = [m for m, ok in ((m1, l1), (m2, l2)) if ok]
+                if not live:
+                    return cur, False
+                cur = intersect(live)
+            elif isinstance(s, (ast.For, ast.AsyncFor, ast.While)):
+                head = cur - _all_deletes(s.body, tracked)
+                loop_breaks.append([])
+                walk(s.body, head)
+                breaks = loop_breaks.pop()
+                m_else, l_else = walk(s.orelse, head)
+                exits = ([m_else] if l_else else []) + breaks
+                if not exits:
+                    return cur, False
+                cur = intersect(exits)
+            elif isinstance(s, (ast.Try, ast.TryStar)):
+                ret_mark = len(returns)
+                body_dels = _all_deletes(s.body, tracked)
+                h_start = cur - body_dels
+                m_body, l_body = walk(s.body, cur)
+                if l_body:
+                    m_else, l_else = walk(s.orelse, m_body)
+                else:
+                    m_else, l_else = m_body, False
+                ends: list[tuple[frozenset[str], bool]] = [(m_else, l_else)]
+                for h in s.handlers:
+                    ends.append(walk(h.body, h_start))
+                live = [m for m, ok in ends if ok]
+                if s.finalbody:
+                    fin_dels = _all_deletes(s.finalbody, tracked)
+                    if fin_dels:
+                        for i in range(ret_mark, len(returns)):
+                            returns[i] = returns[i] - fin_dels
+                    if live:
+                        cur, ok = walk(s.finalbody, intersect(live))
+                        if not ok:
+                            return cur, False
+                    else:
+                        walk(s.finalbody, h_start)
+                        return cur, False
+                else:
+                    if not live:
+                        return cur, False
+                    cur = intersect(live)
+            elif isinstance(s, (ast.With, ast.AsyncWith)):
+                base = cur - _all_deletes(s.body, tracked)
+                m_body, l_body = walk(s.body, cur)
+                cur = (base & m_body) if l_body else base
+            elif isinstance(s, ast.Match):
+                ends = [walk(c.body, cur) for c in s.cases]
+                exhaustive = any(c.guard is None and _is_irrefutable(c.pattern) for c in s.cases)
+                if not exhaustive:
+                    ends.append((cur, True))
+                live = [m for m, ok in ends if ok]
+                if not live:
+                    return cur, False
+                cur = intersect(live)
+            elif isinstance(s, ast.Delete):
+                dels = {t.id for t in s.targets if isinstance(t, ast.Name) and t.id in tracked}
+                if dels:
+                    cur = cur - dels
+            else:
+                writes = _stmt_writes(s, tracked)
+                if writes:
+                    cur = cur | writes
+        return cur, True
+
+    end_must, falls_through = walk(stmts, frozenset())
+    exits = [*returns, *([end_must] if falls_through else [])]
+    return intersect(exits) if exits else frozenset()
+
+
 def class_known_attrs(body: Sequence[ast.stmt]) -> frozenset[str]:
     """Return the names annotated in a class body or assigned as `self.<name>` in its methods."""
     names: set[str] = set()
@@ -383,8 +541,9 @@ class _Builder:
             params = [*sig.pos, *sig.kwonly, *([sig.vararg] if sig.vararg else []),
                       *([sig.kwarg] if sig.kwarg else [])]
             glob, nonloc = scope_decls(body)
+            must = scope_must_writes(node, body, glob | nonloc)
             funcs[fid] = FuncInfo(fid, kind, node, parent, sig, scope_locals(body, params),
-                                  tuple(body), owner, glob, nonloc)
+                                  tuple(body), owner, glob, nonloc, must)
             by_node[id(node)] = fid
             return fid
 

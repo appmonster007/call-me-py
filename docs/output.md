@@ -159,15 +159,15 @@ To render: `dot -Tsvg graph.dot -o graph.svg` (Graphviz).
 
 `--save-state` and `persist.save_state` write the solver `State` as JSON (`persist.StateDoc`):
 
-- **Header:** `format: "callme-state"`, `version: 4`, `program` (the fingerprint), `max_ctx`,
-  `flow_sensitive`. Version 4 added `module` rows; older documents are rejected.
+- **Header:** `format: "callme-state"`, `version: 5`, `program` (the fingerprint), `max_ctx`,
+  `flow_sensitive`. Version 5 added `writes` (per-node side-effect writes); older documents are rejected.
 - **`values`:** one table holding every `Node` and token. Children come before parents, and
   each row is tagged by kind: `node`, `clo`, `builtin`, `class`, `inst`, `box`, `bound`,
   `classmethod`, `staticmethod`, `super`, `property`, `module`. `persist.Row` gives each
   row's layout.
   Everything else in the document refers to rows by index.
 - **The rest:** `order`, `envs`, `ret`, `entry`, `edges`, `class_attrs`, `inst_attrs`,
-  `heap`, `extern`, `bases` and `metaclasses` mirror the [`State` fields](architecture.md#solver-state-transferstate).
+  `heap`, `extern`, `writes`, `bases` and `metaclasses` mirror the [`State` fields](architecture.md#solver-state-transferstate).
   Function and class ids are stored as full uids, and loading resolves them against the
   `Program`.
 

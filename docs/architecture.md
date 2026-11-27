@@ -137,12 +137,13 @@ contexts.
 | `inst_attrs` | `Instance -> Env` | attributes of each abstract object |
 | `heap` | `Box -> Vals` | what was stored into each container after it was created |
 | `extern` | `FuncId -> Env` | writes from other scopes: `global` and `nonlocal`, and `module.attr = v` into a module body |
+| `writes` | `Node -> (FuncId -> Env)` | per-node `global`, `nonlocal` and module-attribute writes (direct and transitive), applied back at call sites in flow mode |
 | `bases`, `metaclasses` | `ClassId -> ...` | direct user bases and metaclasses (`State.mro` computes and caches the MRO) |
 | `changed` | `bool` | set by any write that grew something during the current round |
 
 Writes go through joining helpers, all of which set `changed`: `register`, `resolve`,
-`add_class_attr`, `add_inst_attr`, `add_heap`, `add_extern`, `add_bases`, `add_metaclass`.
-`solver.step` joins `envs`, `ret` and `edges`.
+`add_class_attr`, `add_inst_attr`, `add_heap`, `add_extern`, `add_write`, `add_bases`,
+`add_metaclass`. `solver.step` joins `envs`, `ret` and `edges`.
 
 ## Where to look
 

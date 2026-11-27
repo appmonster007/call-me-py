@@ -201,3 +201,140 @@ def test_funcid_parts_and_rendering() -> None:
 def test_id_style_module() -> None:
     cg = analyze_source("def f(): pass\nf()\n", "pkg/m.py", id_style="module")
     assert ("pkg.m.<module>", "pkg.m.f") in cg.function_edges()
+
+
+def _site_targets(cg: CallGraph, caller: str) -> dict[int, set[str]]:
+    out: dict[int, set[str]] = {}
+    for e in cg.edges:
+        if e.caller.func.qualname == caller:
+            out.setdefault(e.site.line, set()).add(e.callee.func.qualname)
+    return out
+
+
+def test_nonlocal_strong_and_weak_updates() -> None:
+    # Unconditional nonlocal rebinding: exact before and after each setter call.
+    cg = graph("""
+        def a(): pass
+        def b(): pass
+        def c(): pass
+        def outer():
+            f = a
+            def set_b():
+                nonlocal f
+                f = b
+            def set_c():
+                nonlocal f
+                f = c
+            f()
+            set_b()
+            f()
+            set_c()
+            f()
+        outer()
+    """)
+    sites = _site_targets(cg, "outer")
+    assert sites[13] == {"a"}
+    assert sites[15] == {"b"}
+    assert sites[17] == {"c"}
+
+    # Conditional nonlocal write stays weak (keeps old binding).
+    cg2 = graph("""
+        def a(): pass
+        def b(): pass
+        def outer(flag):
+            f = a
+            def maybe():
+                nonlocal f
+                if flag:
+                    f = b
+            maybe()
+            return f()
+        outer(True)
+    """)
+    assert {("outer", "a"), ("outer", "b")} <= cg2.function_edges()
+
+
+def test_nonlocal_indirect_and_recursive_soundness() -> None:
+    # Indirect write through a helper propagates back via State.writes.
+    cg = graph("""
+        def a(): pass
+        def b(): pass
+        def run(cb): cb()
+        def outer():
+            f = a
+            def inner():
+                nonlocal f
+                f = b
+            run(inner)
+            return f()
+        outer()
+    """)
+    assert {("outer", "a"), ("outer", "b")} <= cg.function_edges()
+
+    # Recursive closure mutating outer activation's nonlocal must reach outer activation.
+    cg2 = graph("""
+        def a(): pass
+        def b(): pass
+        def outer(cb=None):
+            f = a
+            def inner():
+                nonlocal f
+                f = b
+            if cb is not None:
+                cb()
+            else:
+                outer(inner)
+            return f()
+        outer()
+    """)
+    assert {("outer", "a"), ("outer", "b")} <= cg2.function_edges()
+
+
+def test_nonlocal_conditional_expressions_and_stubs_stay_weak() -> None:
+    # Short-circuit expressions, comprehensions, try/except, and stubs must not strong-kill.
+    cg = graph("""
+        def a(): pass
+        def b(): pass
+        def outer(flag, xs):
+            f = a
+            def inner(*_):
+                nonlocal f
+                f = b
+            _ = inner() if flag else 0
+            f()
+            f = a
+            _ = flag and inner()
+            f()
+            f = a
+            _ = [inner() for _ in xs]
+            f()
+            f = a
+            list(map(inner, xs))
+            f()
+            f = a
+            try:
+                inner()
+            except ValueError:
+                f()
+        outer(False, [])
+    """)
+    sites = _site_targets(cg, "outer")
+    for line in (10, 13, 16, 19, 24):
+        assert sites[line] == {"a", "b"}
+
+
+def test_global_rebinding_flow_sensitive_per_site() -> None:
+    cg = graph("""
+        def a(): pass
+        def b(): pass
+        def set_q():
+            global q
+            q = b
+        q = a
+        q()
+        set_q()
+        q()
+    """)
+    sites = _site_targets(cg, "<module>")
+    assert sites[8] == {"a"}
+    assert sites[10] == {"b"}

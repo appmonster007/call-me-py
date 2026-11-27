@@ -92,10 +92,14 @@ imports, catches or binds in a pattern, minus names declared `global` or `nonloc
 5. otherwise the empty set.
 
 `global x` writes go to `State.extern[module]`, the body of the writer's own module, and
-`nonlocal x` writes to `State.extern[owner]`. The owner adds `extern` to every read of `x`,
-because any call may have written it. An import binds a module object or one of its
-attributes (§11); a module outside the program binds a stub when it is one of
-`stubs.STUB_MODULES`, and nothing otherwise.
+`nonlocal x` writes to `State.extern[owner]`. In flow mode, every node also records the
+`global`, `nonlocal` and module-attribute writes it performs (directly or via callees) in
+`State.writes[node]`. At a call site, those writes are applied back to the caller's
+environment—as a strong update when every matching callee statically assigns the variable on
+every normal-return path (`FuncInfo.must_writes`), and as a weak join otherwise—while other
+scopes still see the owner's summary (`State.envs`, which includes `State.extern`). An import
+binds a module object or one of its attributes (§11); a module outside the program binds a stub
+when it is one of `stubs.STUB_MODULES`, and nothing otherwise.
 
 ## 6. Flow sensitivity
 
