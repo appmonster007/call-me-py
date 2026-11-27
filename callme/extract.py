@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath
+from typing import final
 
 from .cfg import build_cfg
 from .model import CFG, ClassId, FuncId, Site, module_name
@@ -317,7 +318,7 @@ def scope_must_writes(node: ast.AST, body: Sequence[ast.AST],
 
     def intersect(sets: Sequence[frozenset[str]]) -> frozenset[str]:
         """Return the intersection of non-empty sequence `sets`."""
-        return frozenset.intersection(*sets)
+        return sets[0].intersection(*sets[1:])
 
     def walk(seq: Sequence[ast.stmt], cur: frozenset[str]) -> tuple[frozenset[str], bool]:
         """Return (must-written set at fallthrough, whether fallthrough is reachable)."""
@@ -719,6 +720,7 @@ def _dynamic_import_name(n: ast.Call) -> str | None:
     return None
 
 
+@final
 class _Loader:
     """Loads entry files and, transitively, every project module they import.
 

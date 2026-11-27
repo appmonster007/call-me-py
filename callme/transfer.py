@@ -125,7 +125,7 @@ class State:
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
     unknown_decos: set[tuple[Node, Site]]  # decorator sites confirmed unresolved -> identity
-    _pending_decos: set[tuple[Node, Site]]  # transient: empty decorator sites seen in current round
+    pending_decos: set[tuple[Node, Site]]  # transient: empty decorator sites seen in current round
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
@@ -153,7 +153,7 @@ class State:
         self.bases = {}
         self.metaclasses = {}
         self.unknown_decos = set()
-        self._pending_decos = set()
+        self.pending_decos = set()
         self._mro_cache = {}
         self.changed = False
 
@@ -876,7 +876,7 @@ class Interp:
         return frozenset(kills)
 
     def _apply_writes(self, writes: Mapping[FuncId, Env],
-                      kills: frozenset[str] = frozenset()) -> None:
+                      kills: frozenset[str] | None = None) -> None:
         """Apply callee side-effect `writes` to `self.env` (strong for `kills`) and propagate.
 
         Writes targeting `self.info.id` update `self.env`, `self.summary` and `self.tries`.
@@ -884,6 +884,8 @@ class Interp:
         non-module function, which may belong to an outer recursive activation—are propagated to
         `State.writes[self.node]`.
         """
+        if kills is None:
+            kills = frozenset()
         own = writes.get(self.info.id)
         if self.flow:
             for name in kills:
@@ -2054,7 +2056,7 @@ def analyze(node: Node, state: State, prog: Program,
         it.run()
         for site in it.empty_decos:
             if (node, site) not in state.unknown_decos:
-                state._pending_decos.add((node, site))
+                state.pending_decos.add((node, site))
         return it.summary, it.ret, it.calls
     for name, vals in state.extern.get(node.func, {}).items():  # global / nonlocal writes
         it.env[name] = it.env.get(name, EMPTY) | vals
@@ -2067,5 +2069,5 @@ def analyze(node: Node, state: State, prog: Program,
         if it.env == snapshot:
             for site in it.empty_decos:
                 if (node, site) not in state.unknown_decos:
-                    state._pending_decos.add((node, site))
+                    state.pending_decos.add((node, site))
             return it.env, it.ret, it.calls

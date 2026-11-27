@@ -122,7 +122,7 @@ def _has_sites(case: Path) -> bool:
     return "SITES" in parse_blocks(doc)
 
 
-SITE_PARAMS = [p for p in CASE_PARAMS if _has_sites(p.values[0])]  # type: ignore[arg-type]
+SITE_PARAMS = [p for p in CASE_PARAMS if isinstance(p.values[0], Path) and _has_sites(p.values[0])]
 
 
 @pytest.mark.parametrize("case", SITE_PARAMS)
@@ -135,8 +135,8 @@ def test_sites(case: Path) -> None:
     cg = _callgraph(case)
     wrong: list[str] = []
     for (caller, line), callees in sorted(want.items()):
-        got = set().union(*(cg.targets(s) for s in cg.sites
-                            if cg.name(s.caller) == caller and s.line == line))
+        got = set[str]().union(*(cg.targets(s) for s in cg.sites
+                                 if cg.name(s.caller) == caller and s.line == line))
         if got != callees:
             wrong.append(f"  {caller}:{line}  expected {sorted(callees)}, found {sorted(got)}")
     assert not wrong, f"{case.name}: {len(wrong)} call lines resolve differently\n" + "\n".join(wrong)

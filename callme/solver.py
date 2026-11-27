@@ -73,7 +73,7 @@ def step(prog: Program, state: State) -> State:
     next round treats them as the identity) and `state.changed` is set to True. Return `state`.
     """
     state.changed = False
-    state._pending_decos.clear()
+    state.pending_decos.clear()
     for node in list(state.order):
         env, ret, calls = analyze(node, state, prog)
         old_env = state.envs.get(node, {})
@@ -92,12 +92,12 @@ def step(prog: Program, state: State) -> State:
             if edge not in state.edges:
                 state.edges.add(edge)
                 state.changed = True
-    if not state.changed and state._pending_decos:
-        new_unknown = state._pending_decos - state.unknown_decos
+    if not state.changed and state.pending_decos:
+        new_unknown = state.pending_decos - state.unknown_decos
         if new_unknown:
             state.unknown_decos |= new_unknown
             state.changed = True
-    state._pending_decos.clear()
+    state.pending_decos.clear()
     return state
 
 
