@@ -20,9 +20,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Iterable, Iterator
 
-from .extract import Program
-from .model import CALL_EDGE, CFG, RETURN_EDGE, Edge, IEdge, Node
-from .transfer import State
+from ..analysis import State
+from ..frontend import Program
+from ..model import CALL_EDGE, CFG, RETURN_EDGE, Edge, IEdge, Node
 
 Point = tuple[Node, int]
 SYNTACTIC_KINDS = ("call", "decorator")  # site kinds that are CFG call points

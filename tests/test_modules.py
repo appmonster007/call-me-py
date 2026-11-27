@@ -15,7 +15,7 @@ import pytest
 
 from callme import analyze_file, analyze_files, load_state, save_state
 from callme.__main__ import main as cli
-from callme.extract import ModuleInfo, absolute_module, module_all, parse_file
+from callme.frontend import ModuleInfo, absolute_module, module_all, parse_file
 from callme.model import token_label
 
 Edge = tuple[str, str]

@@ -10,7 +10,7 @@ g = square if flag else double
 g(3)                        # g = {square, double}  ->  edges to both
 ```
 
-`transfer.Interp` evaluates every expression to an abstract value (`model.Vals`), a frozenset
+`analysis.Interp` evaluates every expression to an abstract value (`model.Vals`), a frozenset
 of tokens. A token is anything that can be called or can lead to a call: a closure, a builtin
 stub, a class, an instance, a container, a bound method, a descriptor (see the
 [token table](architecture.md#data-types-modelpy)). Numbers, strings and other data evaluate
@@ -58,7 +58,7 @@ make(double)(2)
    `include_unreachable`, every module body and every other function is also a root, with an
    empty context (its parent is its module's node for top-level functions). This way
    functions that are never called still get their edges.
-2. **A round** runs `transfer.analyze` on every node in `State.order`. It joins each node's
+2. **A round** runs `analysis.analyze` on every node in `State.order`. It joins each node's
    environment summary, return value and edges into the `State`.
 3. **Calls during a round.** A call with a new entry state registers a new node
    (`State.resolve`). The call evaluates to whatever `State.ret` holds for the callee so far,
@@ -76,13 +76,13 @@ Values only grow and the abstract domain is finite (§4), so the loop terminates
 | Bound | Default | Past it |
 |---|---|---|
 | contexts per function (`max_contexts`, `--max-contexts`) | 16 | further calls go to one widened node `f[*]` (`Ctx(merged=True)`), whose entry state is the union of all calls that reach it (`State.entry`); `0` makes the analysis context-insensitive |
-| closure parent depth (`transfer.MAX_DEPTH`) | 3 | the closure forgets its defining node (`parent=None`), and its free variables are read from the union over every context of the enclosing function |
-| arguments bound in a partial (`stubs.MAX_PARTIAL_ARGS`) | 4 | the partial is widened to `<partial*>`, which passes every bound argument via `*` |
-| token nesting inside partial, property, classmethod and staticmethod arguments (`stubs.MAX_PARTIAL_DEPTH`) | 3 | deeper tokens are dropped |
+| closure parent depth (`analysis.MAX_DEPTH`) | 3 | the closure forgets its defining node (`parent=None`), and its free variables are read from the union over every context of the enclosing function |
+| arguments bound in a partial (`registry.MAX_PARTIAL_ARGS`) | 4 | the partial is widened to `<partial*>`, which passes every bound argument via `*` |
+| token nesting inside partial, property, classmethod and staticmethod arguments (`registry.MAX_PARTIAL_DEPTH`) | 3 | deeper tokens are dropped |
 
 ## 5. Names and scopes
 
-`extract.scope_locals` precomputes each function's locals: every name it assigns, defines,
+`frontend.scope_locals` precomputes each function's locals: every name it assigns, defines,
 imports, catches or binds in a pattern, minus names declared `global` or `nonlocal`.
 `Interp.lookup` then resolves a name in this order:
 
@@ -121,7 +121,7 @@ solver does not use the CFG.
 - **`if`**: both branches run on copies of the environment, which are joined afterwards
   (`Interp._path`, `Interp._meet`).
 - **Loops** re-run the body until the environment at the loop head stops growing. The
-  environments at `break` and `continue` are collected per loop (`_LoopFrame`).
+  environments at `break` and `continue` are collected per loop (`LoopFrame`).
 - **`return`, `raise`, `break`, `continue`** end the current path (`Interp.live = False`).
   Statements after them are still interpreted, so their call sites get edges, but their state
   never flows into live code.
@@ -187,7 +187,7 @@ for a in [Dog(), Cat()]:
   site, so two `Dog()` calls in different places have separate fields (`State.inst_attrs`).
 - **Reading `obj.attr`** (`Interp.attribute`):
   - Instance attributes come first, then the class attribute found along the MRO, bound by
-    descriptor rules (`transfer._bind_attr`). A function becomes a `BoundMethod`,
+    descriptor rules (`bind_attr`, in `analysis/interp/base.py`). A function becomes a `BoundMethod`,
     `classmethod` binds the class, and `staticmethod` returns the plain function.
   - A `property` calls its getter, and a user descriptor has its `__get__` called.
   - If the attribute is known neither statically (`ClassInfo.known_attrs`) nor from the
@@ -231,7 +231,7 @@ defines it.
 
 ## 10. Stubs for builtins and the standard library
 
-No C code is analysed. Instead, `stubs.py` replays on abstract values what a builtin does with
+No C code is analysed. Instead, `callme/stubs/` replays on abstract values what a builtin does with
 its arguments. It invokes callbacks through `Interp.apply` *at the call site of the
 higher-order function*, so `map(f, xs)` inside `main` gives the edge `main -> f`. This matches
 a traced run, where C frames are invisible.
@@ -262,13 +262,13 @@ go(task)                           # main.<module> -> pkg.core.run, pkg.core.run
 pkg.core.run(task)                 # the same edges, through the submodule attribute
 ```
 
-**Loading** (`extract.parse_files`). The entry files are parsed first, then every module they
+**Loading** (`frontend.parse_files`). The entry files are parsed first, then every module they
 import, transitively. Every import statement counts, wherever it is: inside a function, a
 `try` or an `if TYPE_CHECKING:`. So do `__import__("m")` and `importlib.import_module("m")`
 with a string literal. All modules become one `Program`: their functions share one table, and
 `Program.modules` maps each dotted name to a `ModuleInfo`.
 
-**Names and resolution.** An entry is named by `extract.entry_module`: its stem, prefixed by
+**Names and resolution.** An entry is named by `frontend.entry_module`: its stem, prefixed by
 every enclosing directory that has an `__init__.py`. The first directory that is not a package
 is its root. Imports are looked up the way Python's path finder does, in the entry roots and
 then in `search_path`:
@@ -277,14 +277,14 @@ then in `search_path`:
 - a directory without `__init__.py` is a namespace package, but only when no directory has a
   regular module;
 - submodules are searched in their package's directories;
-- relative imports count from the importing module's package (`extract.absolute_module`);
+- relative imports count from the importing module's package (`frontend.absolute_module`);
 - a module built into the interpreter (`sys.builtin_module_names`) is never a project file,
   and a top-level namespace directory never shadows a standard library module.
 
 An import that names no file stays external. Every id records its module (`FuncId.module`),
 so the "module" id style prints `pkg.core.run`.
 
-**Import semantics** (the `modules` section of `transfer.Interp`):
+**Import semantics** (`ModuleLayer`, in `analysis/interp/modules.py`):
 
 - `import a.b.c` runs `a`, `a.b` and `a.b.c` (`Interp.run_module`) and binds `a` to the token
   `Module("a")`; `import a.b.c as x` binds `x` to `Module("a.b.c")`.
@@ -297,7 +297,7 @@ so the "module" id style prints `pkg.core.run`.
   patching another module is seen by that module's own code.
 - `from m import *` binds the names in `ModuleInfo.exports`: the literal `__all__`, or else
   every public module-level name. Those names are added to the importer's locals when the
-  program is built (`_Builder.link_star_imports`), and star imports of star imports are
+  program is built (`ProgramBuilder.link_star_imports`), and star imports of star imports are
   followed.
 
 Module bodies are read as summaries, so the import order does not matter, and circular

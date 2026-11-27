@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, Self
 
-from .extract import Program
+from ..frontend import Program
 
 
 class PassState(Protocol):

@@ -46,15 +46,15 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/solver.py::solve"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/solver.py::solve"></code-ref></dt>
         <dd>the round loop; its <code>on_round</code> hook is how <code>info/build.py</code> recorded this trace</dd>
-        <dt><code-ref sym="callme/transfer.py::analyze"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/__init__.py::analyze"></code-ref></dt>
         <dd>one node to its local fixpoint: run the body until its env stops changing</dd>
-        <dt><code-ref sym="callme/transfer.py::State"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State"></code-ref></dt>
         <dd>everything the rounds accumulate: nodes, envs, return values, edges, heap, class tables</dd>
-        <dt><code-ref sym="callme/transfer.py::State.register"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State.register"></code-ref></dt>
         <dd>a new node joins <code>order</code> and sets <code>changed</code>, which buys another round</dd>
-        <dt><code-ref sym="callme/transfer.py::MAX_DEPTH"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::MAX_DEPTH"></code-ref></dt>
         <dd>one of the widening limits that keep the state finite</dd>
       </dl>
     </section>

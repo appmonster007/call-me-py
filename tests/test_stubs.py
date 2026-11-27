@@ -1,13 +1,13 @@
-"""Tests for builtin and stdlib stubs in callme/stubs.py."""
+"""Tests for builtin and stdlib stubs in callme/stubs/."""
 from __future__ import annotations
 
 import json
 import textwrap
 
 from callme import analyze_source
-from callme.extract import build_program
-from callme.persist import state_from_dict, state_to_dict
-from callme.solver import solve
+from callme.analysis import solve
+from callme.frontend import build_program
+from callme.output import state_from_dict, state_to_dict
 
 
 def edges(src: str) -> frozenset[tuple[str, str]]:

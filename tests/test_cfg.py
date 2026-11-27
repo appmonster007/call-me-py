@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from callme import CallGraph, analyze_file, analyze_source, to_icfg_dot, to_json
-from callme.extract import build_program, call_sites, parse_file
+from callme.frontend import build_program, call_sites, parse_file
 from callme.model import (AFTER_CALL, BRANCH, CALL, CALL_EDGE, CALL_TO_RETURN, CFG, EXC, FALSE,
                           LOOP, RETURN_EDGE, TRUE)
 

@@ -70,12 +70,13 @@ assets/style.css          design tokens (both themes) and every component
 ## Referencing code
 
 ```html
-<code-ref sym="callme/transfer.py::Interp.apply"></code-ref>     a button that opens the real source
-<code-ref sym="examples/cases/README.md">case format</code-ref>  a whole file, with a label
-<code-snippet sym="callme/stubs.py::_starmap"></code-snippet>    the source, inline
+<code-ref sym="callme/analysis/interp/calls.py::CallLayer.apply"></code-ref>  a button that opens the real source
+<code-ref sym="examples/cases/README.md">case format</code-ref>               a whole file, with a label
+<code-snippet sym="callme/stubs/itertools.py::_starmap"></code-snippet>       the source, inline
 ```
 
-`sym` is `path::Dotted.name`: a function, class, method, or module-level assignment.
+`sym` is `path::Dotted.name`: a function, class, method, or module-level assignment. A method
+of `Interp` is named by the layer class that defines it, such as `CallLayer.apply`.
 `build.py` collects every `sym="…"` in `info/`, so a rename in `callme/` makes the test fail and
 names the page to fix. Scripts can read a collected symbol's source with `Docs.snippet(sym)`.
 

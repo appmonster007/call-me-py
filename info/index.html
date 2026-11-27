@@ -23,32 +23,32 @@
 
   <div class="prose">
     <h2>The pipeline</h2>
-    <p>Five files do the work. <code>solver</code> and <code>transfer</code> form a loop: the solver keeps
-      asking <code>transfer</code> to re-analyse functions until nothing changes.</p>
+    <p>Five parts do the work. <code>solver</code> and <code>interp</code> form a loop: the solver keeps
+      asking <code>interp</code> to re-analyse functions until nothing changes.</p>
   </div>
   <div class="wide stages" id="stages">
-    <div class="stage-card" data-stage="extract">
-      <div class="stage-name">extract</div><code-ref sym="callme/extract.py"></code-ref>
+    <div class="stage-card" data-stage="frontend">
+      <div class="stage-name">frontend</div><code-ref sym="callme/frontend/__init__.py"></code-ref>
       <p>finds every function, its scope and its call sites</p>
     </div>
     <div class="stage-arrow" aria-hidden="true">→</div>
     <div class="stage-card" data-stage="solver">
-      <div class="stage-name">solver</div><code-ref sym="callme/solver.py"></code-ref>
+      <div class="stage-name">solver</div><code-ref sym="callme/analysis/solver.py"></code-ref>
       <p>re-analyses every (function, context) node until a round changes nothing</p>
     </div>
     <div class="stage-arrow" aria-hidden="true">⇄</div>
-    <div class="stage-card" data-stage="transfer">
-      <div class="stage-name">transfer</div><code-ref sym="callme/transfer.py"></code-ref>
-      <p>evaluates one function body on abstract values; <code>stubs.py</code> covers the builtins</p>
+    <div class="stage-card" data-stage="interp">
+      <div class="stage-name">interp</div><code-ref sym="callme/analysis/interp/__init__.py"></code-ref>
+      <p>evaluates one function body on abstract values; <code>stubs/</code> covers the builtins</p>
     </div>
     <div class="stage-arrow" aria-hidden="true">→</div>
     <div class="stage-card" data-stage="callgraph">
-      <div class="stage-name">callgraph</div><code-ref sym="callme/callgraph.py"></code-ref>
+      <div class="stage-name">callgraph</div><code-ref sym="callme/output/callgraph.py"></code-ref>
       <p>collapses the solver state into a call graph</p>
     </div>
     <div class="stage-arrow" aria-hidden="true">→</div>
     <div class="stage-card" data-stage="export">
-      <div class="stage-name">export</div><code-ref sym="callme/export.py"></code-ref>
+      <div class="stage-name">export</div><code-ref sym="callme/output/export.py"></code-ref>
       <p>writes JSON or Graphviz DOT</p>
     </div>
   </div>
@@ -61,7 +61,7 @@
     <p>The same shapes and colors mean the same thing on every page.</p>
     <div class="legend" id="legend"></div>
     <p class="muted small">Every analyzer result on these pages comes from a real run, recorded by
-      <code>info/build.py</code>. Buttons like <code-ref sym="callme/solver.py::solve"></code-ref> open the
+      <code>info/build.py</code>. Buttons like <code-ref sym="callme/analysis/solver.py::solve"></code-ref> open the
       actual source. Scenes step with ◀ ▶ or the arrow keys; <code>#scene=3</code> in the address links
       to a step.</p>
   </div>

@@ -69,14 +69,15 @@
     },
   ];
 
+  const STUB_FILE = { _map: "builtins", _sorted: "builtins", _partial: "functools", _call_partial: "functools" };
   let shown = null;
   new Stepper(root, steps, (step) => {
     code.set(step.code);
     if (step.stub !== shown) {
       shown = step.stub;
-      stubTitle.textContent = step.stub ? `The stub: stubs.py · ${step.stub}` : "The stub";
+      stubTitle.textContent = step.stub ? `The stub: stubs/${STUB_FILE[step.stub]}.py · ${step.stub}` : "The stub";
       stubBox.replaceChildren();
-      const sym = `callme/stubs.py::${step.stub}`;
+      const sym = `callme/stubs/${STUB_FILE[step.stub]}.py::${step.stub}`;
       if (step.brief) stubBox.append(el("p", { class: "muted small" }, "Long, mostly bookkeeping for partials of partials: ", el("code-ref", { sym })));
       else if (step.stub) {
         const ref = Docs.snippet(sym);

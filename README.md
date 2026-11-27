@@ -75,12 +75,12 @@ cg2 = analyze_file("prog.py", state=cg.state, include_unreachable=True)
 ## How it works
 
 ```
-source ─► extract ─► Program ─► solver ─► State ─► callgraph ─► CallGraph ─► export
-          ids, scopes,          fixpoint over         nodes, edges,          JSON / DOT
-          signatures, CFGs      (function, context)   sites, labels
+source ─► frontend ─► Program ─► solver ─► State ─► callgraph ─► CallGraph ─► export
+          ids, scopes,           fixpoint over         nodes, edges,          JSON / DOT
+          signatures, CFGs       (function, context)   sites, labels
 ```
 
-1. **extract** parses the entry files and every project module they import. Every function
+1. **frontend** parses the entry files and every project module they import. Every function
    (def, lambda, module body) and class gets an id, a scope (its locals, globals and
    nonlocals), a signature and a control-flow graph.
 2. **solver** starts at the entry module bodies and abstractly interprets each (function,
@@ -114,6 +114,11 @@ only partly supported, so `pytest.ini` leaves them out of the default run.
 
 ```
 callme/                    the analyzer (map: docs/architecture.md)
+  model/                   data types: ids, tokens, contexts, CFGs
+  frontend/                source -> Program: loading modules, scopes, call sites, CFGs
+  stubs/                   models of builtin and stdlib functions, one module per library
+  analysis/                the abstract interpreter (interp/) and the fixpoint (solver)
+  output/                  the call graph, JSON / DOT export, saved states
 tests/                     pytest suite
 examples/cases/            ground-truth programs, one feature each, grouped by family (see its README)
 examples/*.py              loose programs (and examples/project/main.py); tests only check they analyse

@@ -3,7 +3,7 @@
 call-me-py builds context-sensitive call graphs for Python programs by abstract
 interpretation, following imports from the entry files into every project module. The package is `callme/`, it uses only the standard library, and it needs
 Python ≥ 3.12. Read [README.md](README.md) for an overview and `docs/` for details. The docs
-are written so that you rarely need to read `transfer.py` in full, and every function's
+are written so that you rarely need to read the interpreter in full, and every function's
 docstring states its contract, so reading a definition's first lines is usually enough.
 
 ## Commands (run from the repo root)
@@ -19,17 +19,20 @@ python info/build.py                      # after changing callme/: regenerate i
 
 ## Map
 
-| File | Lines | What it holds |
-|---|---|---|
-| `callme/model.py` | 564 | every data type: ids, tokens, `Ctx` / `Node` / `Site` / `Edge`, CFG types |
-| `callme/cfg.py` | 478 | CFG builder, one CFG per function |
-| `callme/extract.py` | 750 | loading files into a `Program`: import resolution, ids, scopes, signatures, call sites |
-| `callme/stubs.py` | 690 | models of builtin and stdlib functions (`@stub` registry) |
-| `callme/transfer.py` | 1814 | `State` (global tables) and `Interp` (abstract interpreter); read it by banner section |
-| `callme/pipeline.py`, `solver.py` | 131, 140 | the multi-pass driver and the call graph pass (`solve`) |
-| `callme/icfg.py`, `callgraph.py`, `export.py` | 138, 97, 186 | the ICFG, the `CallGraph` result, JSON / DOT |
-| `callme/persist.py` | 393 | saving and loading state |
-| `callme/__init__.py`, `__main__.py` | 115, 105 | public API, CLI |
+| Package | What it holds |
+|---|---|
+| `callme/model/` | every data type: `ids.py` (ids, `Site`), `values.py` (tokens, `Vals`, `Ctx`, `Node`), `graphs.py` (`Edge`, CFG types) |
+| `callme/frontend/` | loading files into a `Program`: `loader.py` (finding files, module names), `builder.py` (ids, star imports), `scopes.py`, `sites.py`, `cfg.py` (one CFG per function), `program.py` (the types) |
+| `callme/stubs/` | models of builtin and stdlib functions: `registry.py` (`@stub`, `Args`, `Host`), then one module per library (`builtins.py`, `functools.py`, `asyncio.py`, ...) |
+| `callme/analysis/` | `state.py` (`State`, the global tables), `interp/` (`Interp`, the abstract interpreter, one layer per module), `pipeline.py` (multi-pass driver), `solver.py` (the call graph pass, `solve`) |
+| `callme/output/` | `callgraph.py` (the `CallGraph` result), `icfg.py`, `export.py` (JSON / DOT), `persist.py` (saving and loading state) |
+| `callme/__init__.py`, `__main__.py` | public API, CLI |
+
+`Interp` is a chain of classes, each subclassing the one below: `base.py` → `names.py` →
+`modules.py` → `calls.py` → `attributes.py` → `expressions.py` → `operators.py` →
+`statements.py` → `definitions.py` → `flow.py` → `Interp` in `interp/__init__.py`. A layer
+may call any method of the layers below it. `eval` and `apply` are also called from layers
+below the ones that define them, so `BaseLayer` declares them as abstract methods.
 
 | Need | Read |
 |---|---|
@@ -44,16 +47,23 @@ python info/build.py                      # after changing callme/: regenerate i
 - `State` only grows: every write is a join. Re-solving a fixpoint must not change it
   (`State.same_result`), and a pass's `init` is idempotent.
 - Every syntactic call, meaning an `ast.Call` or a decorator, is both a CFG call point
-  (`cfg.Builder.call_point`) and a `Site` from `extract.make_site`, with the same line, column
+  (`cfg.Builder.call_point`) and a `Site` from `frontend.make_site`, with the same line, column
   and kind. `icfg.build_icfg` raises if the two drift apart.
-- Builtin and stdlib behaviour belongs in `stubs.py`, not in `transfer.py`.
+- Builtin and stdlib behaviour belongs in `stubs/`, not in `analysis/interp/`.
 - Keep abstract values finite: anything that can nest needs a depth or widening bound.
 - `EXPECTED` edges in a case docstring are ground truth from a traced run, so change the
   analyzer to make a case pass, not the expected edges.
-- Modules: finding and loading files, module names and `__all__` belong in `extract.py`
-  (`_Loader`, `_Builder`); what an import binds at analysis time belongs in the `modules`
-  section of `transfer.Interp`. Running an imported module registers its body as a node but
+- Modules: finding and loading files, module names and `__all__` belong in `frontend/`
+  (`loader._Loader`, `builder.ProgramBuilder`); what an import binds at analysis time belongs
+  in `analysis/interp/modules.py`. Running an imported module registers its body as a node but
   records no call edge.
+- Imports: a package imports only the packages before it in `model` → `frontend` → `stubs` →
+  `analysis` → `output`. Import another package through its `__init__`
+  (`from ..model import Vals`), and a module of your own package directly
+  (`from .scopes import scope_locals`), never through your own package's `__init__`.
+- Keep files small: a new concern gets its own module in the right package, and an `Interp`
+  method goes into the layer that matches it. `stubs/__init__.py` imports the stub modules in
+  registration order; `from m import *` depends on that order, so add new ones at the end.
 - `info/generated/data.js` is generated: rerun `python info/build.py` instead of editing it.
   `tests/test_info.py` runs `--check`.
 - Style: `from __future__ import annotations`, full type hints (`pyrightconfig.json`), frozen

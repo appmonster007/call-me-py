@@ -20,7 +20,7 @@ import sys
 from collections.abc import Sequence
 
 from . import CallGraph, analyze_files, load_state, save_state, to_dot, to_icfg_dot, to_json
-from .extract import call_sites, parse_files
+from .frontend import call_sites, parse_files
 
 
 def print_graph(cg: CallGraph) -> None:

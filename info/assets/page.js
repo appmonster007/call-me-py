@@ -3,9 +3,10 @@
  *   Docs.CHAPTERS   the table of contents (add a chapter here: slug = file name in chapters/)
  *   Docs.STAGES     the analyzer pipeline shown in the header; a chapter highlights its stage(s)
  *   header, prev/next pager, theme toggle (built on DOMContentLoaded from <body data-chapter>)
- *   <code-ref sym="callme/transfer.py::Interp.apply">   link to real code; the snippet comes from
- *                    generated data, and info/build.py fails if the symbol no longer exists
- *   <code-snippet sym="callme/stubs.py::_map">         the same real code, shown inline
+ *   <code-ref sym="callme/analysis/interp/calls.py::CallLayer.apply">   link to real code; the
+ *                    snippet comes from generated data, and info/build.py fails if the symbol
+ *                    no longer exists
+ *   <code-snippet sym="callme/stubs/builtins.py::_map">                 the same real code, inline
  *
  * Load order on a page: core.js, views.js, page.js in <head>; generated/data.js and the chapter
  * script at the end of <body>.
@@ -15,21 +16,21 @@
   const { el } = Docs;
 
   Docs.CHAPTERS = [
-    { slug: "01-who-is-f", title: "Who does f() call?", stage: ["transfer"],
+    { slug: "01-who-is-f", title: "Who does f() call?", stage: ["interp"],
       blurb: "Follow values, not names: abstract values are sets of tokens." },
-    { slug: "02-mapping", title: "Mapping the program", stage: ["extract"],
+    { slug: "02-mapping", title: "Mapping the program", stage: ["frontend"],
       blurb: "Step 1: every function gets an id, a scope and a list of call sites." },
-    { slug: "03-contexts", title: "One function, many lives", stage: ["transfer", "solver"],
+    { slug: "03-contexts", title: "One function, many lives", stage: ["interp", "solver"],
       blurb: "Contexts keep separate calls of the same function apart." },
     { slug: "04-fixpoint", title: "Ask again until nothing changes", stage: ["solver"],
       blurb: "The solver repeats rounds until a whole round learns nothing new." },
-    { slug: "05-closures", title: "Functions that remember", stage: ["transfer"],
+    { slug: "05-closures", title: "Functions that remember", stage: ["interp"],
       blurb: "A function token is tethered to the call that created it." },
-    { slug: "06-heap", title: "Values that wait", stage: ["transfer"],
+    { slug: "06-heap", title: "Values that wait", stage: ["interp"],
       blurb: "Containers are boxes shared by every alias." },
-    { slug: "07-objects", title: "Objects and hidden calls", stage: ["transfer"],
+    { slug: "07-objects", title: "Objects and hidden calls", stage: ["interp"],
       blurb: "Classes, the MRO, bound methods, and the calls Python makes for you." },
-    { slug: "08-stubs", title: "Teaching it the builtins", stage: ["transfer"],
+    { slug: "08-stubs", title: "Teaching it the builtins", stage: ["interp"],
       blurb: "Stubs replay what map, sorted and partial do with their arguments." },
     { slug: "09-output", title: "From state to graph", stage: ["callgraph", "export"],
       blurb: "Collapse contexts, print JSON / DOT, and check against ground truth." },
@@ -38,14 +39,14 @@
   ];
 
   Docs.STAGES = [
-    { id: "extract", file: "callme/extract.py", what: "finds every function, scope and call site" },
-    { id: "solver", file: "callme/solver.py", what: "re-analyses all (function, context) nodes until stable" },
-    { id: "transfer", file: "callme/transfer.py", what: "evaluates one function body on abstract values (stubs.py: builtins)" },
-    { id: "callgraph", file: "callme/callgraph.py", what: "collapses the solver state into a call graph" },
-    { id: "export", file: "callme/export.py", what: "writes JSON or Graphviz DOT" },
+    { id: "frontend", file: "callme/frontend/", what: "finds every function, scope and call site" },
+    { id: "solver", file: "callme/analysis/solver.py", what: "re-analyses all (function, context) nodes until stable" },
+    { id: "interp", file: "callme/analysis/interp/", what: "evaluates one function body on abstract values (stubs/: builtins)" },
+    { id: "callgraph", file: "callme/output/callgraph.py", what: "collapses the solver state into a call graph" },
+    { id: "export", file: "callme/output/export.py", what: "writes JSON or Graphviz DOT" },
   ];
 
-  /** The pipeline as a row of stages; solver ⟲ transfer is drawn as a loop. */
+  /** The pipeline as a row of stages; solver ⟲ interp is drawn as a loop. */
   Docs.pipeline = (current = [], root = "..") => {
     const first = (id) => Docs.CHAPTERS.find((c) => c.stage.includes(id));
     const stage = (id) => {
@@ -59,7 +60,7 @@
     };
     const arrow = () => el("span", { class: "arrow", "aria-hidden": "true" }, "→");
     return el("nav", { class: "pipeline", "aria-label": "analyzer pipeline" },
-      stage("extract"), arrow(), el("span", { class: "loop" }, stage("solver"), stage("transfer")),
+      stage("frontend"), arrow(), el("span", { class: "loop" }, stage("solver"), stage("interp")),
       arrow(), stage("callgraph"), arrow(), stage("export"));
   };
 

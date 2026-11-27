@@ -35,19 +35,19 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/model.py::Box"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Box"></code-ref></dt>
         <dd>a mutable container token, one per allocation site</dd>
-        <dt><code-ref sym="callme/model.py::Alloc"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Alloc"></code-ref></dt>
         <dd>an allocation site: function, line, column</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.new_box"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.new_box"></code-ref></dt>
         <dd>a list / set / dict literal or comprehension gets its Box</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp._mutate_container"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/expressions.py::ExprLayer._mutate_container"></code-ref></dt>
         <dd><code>append</code>, <code>extend</code>, <code>insert</code>, <code>update</code>, … become stores</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.store"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.store"></code-ref></dt>
         <dd>weak update: <code>heap[box] ∪= vals</code></dd>
-        <dt><code-ref sym="callme/transfer.py::State.deref"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State.deref"></code-ref></dt>
         <dd>a value plus everything stored in its boxes, transitively</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.e_Subscript"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/operators.py::OperatorLayer.e_Subscript"></code-ref></dt>
         <dd><code>a[0]</code>: <code>__getitem__</code> on objects, <code>deref</code> on containers</dd>
       </dl>
     </section>

@@ -1,119 +1,16 @@
-"""Core data types shared by every stage of the analysis.
+"""Abstract values: the tokens, `Vals`, and the contexts and nodes that closures capture.
 
-Vocabulary:
-  FuncId       identity of one function (def, lambda or the module body)
-  ClassId      identity of one class definition
-  Closure      a *token*: the abstract value "this function, created in that context"
-  Builtin      a *token* for a builtin / stdlib callable modelled by a stub (see stubs.py)
-  ClassObj     a *token* representing a class object
-  Instance     a *token* representing an abstract instance of a class (per allocation site)
-  Box          a *token* for a mutable container (list / dict / set), per allocation site
-  Module       a *token* for a module object of the program, by dotted name
-  Alloc        an allocation site: where an instance or container is created
-  BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
-  ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
-  StaticMethod a *token*: `staticmethod(func)` descriptor returning `func` unbound
-  Super        a *token*: `super(start, receiver)` proxy along `receiver`'s MRO
-  Property     a *token*: `property(fget, fset, fdel)` descriptor
-  Ctx          a *context*: the abstract entry state of a
-               function (param -> set of tokens) plus the captured defining node
-  Node         (function, context): one analysed instance of a function
-  Edge         call edge between two nodes at a syntactic call site
-  CFG          per-function control-flow graph over program points (CFGNode)
-  IEdge        ICFG edge between program points of two (function, context) nodes
-
-Tokens, `Ctx` and `Node` are frozen dataclasses that compute their hash once, in
-`__post_init__`, and keep it in `_h`, because they are hashed in every set operation.
-A token's `depth` says how deeply other tokens nest inside it; the analysis drops or
-widens tokens that nest too deeply, which keeps every value finite.
+An abstract value `Vals` is a frozenset of tokens. A token's `depth` says how deeply other
+tokens nest inside it; the analysis drops or widens tokens that nest too deeply, which keeps
+every value finite. `Closure` points to the `Node` it was created in, and a `Node`'s `Ctx`
+holds tokens, so the three live in one module.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import PurePath
 from typing import override
 
-
-def module_name(file: str) -> str:
-    """Return the dotted module name for a file path taken as is, e.g. "pkg.util" for "pkg/util.py".
-
-    A trailing `__init__` is dropped. If no name is left, the file path is returned as is.
-    Programs loaded from disk name their modules relative to the import root instead.
-    """
-    parts = PurePath(file).with_suffix("").parts
-    parts = tuple(p for p in parts if p not in ("/", ".", ".."))
-    if parts and parts[-1] == "__init__":
-        parts = parts[:-1]
-    return ".".join(parts) or file
-
-
-@dataclass(frozen=True)
-class _SymId:
-    """Identity layout shared by functions and classes; the string forms are built on demand.
-
-    file      source path as given, e.g. "pkg/util.py"
-    qualname  dotted scope path of the definition, e.g. "Outer.make.inner"
-    lineno    1-based line of the definition
-    col       0-based column of the definition
-    module    dotted name of the defining module, e.g. "pkg.util"; when left empty it is
-              derived from `file` (see `module_name`). It is not part of the identity.
-    """
-
-    qualname: str
-    file: str
-    lineno: int
-    col: int
-    module: str = field(default="", compare=False)
-
-    def __post_init__(self) -> None:
-        """Derive `module` from `file` when it was not given."""
-        if not self.module:
-            object.__setattr__(self, "module", module_name(self.file))
-
-    @property
-    def name(self) -> str:
-        """Return the last part of the qualname, e.g. "inner" for "Outer.make.inner"."""
-        return self.qualname.rsplit(".", 1)[-1]
-
-    @property
-    def scope(self) -> str:
-        """Return the qualname without its last part, e.g. "Outer.make", or "" at top level."""
-        return self.qualname.rpartition(".")[0]
-
-    @property
-    def uid(self) -> str:
-        """Return the "full" form `file:line:col:qualname`, unique even when names repeat."""
-        return self.render("full")
-
-    def render(self, style: str = "full") -> str:
-        """Return this id as a string in the given style.
-
-        style  "full" (file:line:col:qualname, always unique), "module" (module.qualname) or
-               "short" (qualname alone, which can collide)
-
-        Raises `ValueError` for any other style.
-        """
-        if style == "full":
-            return f"{self.file}:{self.lineno}:{self.col}:{self.qualname}"
-        if style == "module":
-            return f"{self.module}.{self.qualname}"
-        if style == "short":
-            return self.qualname
-        raise ValueError(f"unknown id style: {style}")
-
-    @override
-    def __str__(self) -> str:
-        return self.uid
-
-
-@dataclass(frozen=True)
-class FuncId(_SymId):
-    """Identity of one function: a def, async def, lambda or the module body (`<module>`)."""
-
-
-@dataclass(frozen=True)
-class ClassId(_SymId):
-    """Identity of one class definition."""
+from .ids import ClassId, FuncId, Site
 
 
 @dataclass(frozen=True)
@@ -122,7 +19,7 @@ class Closure:
 
     The parent decides which context the closure's free variables are read from. It is None when
     the defining context is unknown, or when keeping it would nest contexts deeper than
-    `transfer.MAX_DEPTH`; free variables are then read from every context of the enclosing
+    `analysis.MAX_DEPTH`; free variables are then read from every context of the enclosing
     function. `depth` counts how many closures are nested through `parent`'s context.
     """
 
@@ -141,7 +38,7 @@ class Closure:
 
 @dataclass(frozen=True)
 class Builtin:
-    """Token for a builtin or stdlib callable, or a stub module, modelled by a stub in stubs.py.
+    """Token for a builtin or stdlib callable, or a stub module, modelled in `callme.stubs`.
 
     name      stub name, e.g. "map", "functools.partial", or "<partial>" for an internal token
     bound     argument values prepended to every call: the receiver of a builtin method such
@@ -439,126 +336,3 @@ class Node:
     @override
     def __hash__(self) -> int:
         return self._h
-
-
-@dataclass(frozen=True)
-class Site:
-    """A call site, identified by its caller and source position.
-
-    text  source text of the call, at most 60 characters; decorators start with "@"
-    kind  "call" or "decorator" for syntactic sites, which are CFG call points; "op", "attr",
-          "iter", "with" or "class" for the implicit dunder calls behind operators, attribute
-          access, iteration, `with` and class creation, which have no CFG point
-    """
-
-    caller: FuncId
-    line: int
-    col: int
-    text: str
-    kind: str = "call"  # "call" | "decorator"
-
-
-@dataclass(frozen=True)
-class Edge:
-    """A call edge: the node `caller` may call the node `callee` at `site`."""
-
-    caller: Node
-    site: Site
-    callee: Node
-
-
-# ---------------------------------------------------------------- control flow
-# CFG node kinds
-ENTRY, EXIT = "entry", "exit"
-STMT = "stmt"              # a statement's own effect (after the calls inside it)
-BRANCH = "branch"          # a test: if / while / assert / case / and-or / comprehension filter
-LOOP = "loop"              # loop head: while join point, for / comprehension "next item"
-HANDLER = "handler"        # start of an except clause
-CALL = "call"              # the call is made here ...
-AFTER_CALL = "after_call"  # ... and its result arrives here (the return point)
-
-# edge kinds: intraprocedural ...
-FLOW, TRUE, FALSE, EXC, CALL_TO_RETURN = "flow", "true", "false", "exc", "call_to_return"
-# ... and interprocedural (ICFG only)
-CALL_EDGE, RETURN_EDGE = "call", "return"
-
-
-@dataclass(frozen=True)
-class CFGNode:
-    """One program point of a function body.
-
-    idx   index of the point in `CFG.nodes`
-    kind  ENTRY, EXIT, STMT, BRANCH, LOOP, HANDLER, CALL or AFTER_CALL
-    site  the call made at a CALL point or returning at its AFTER_CALL point, else None
-    """
-
-    idx: int
-    kind: str
-    line: int
-    col: int
-    text: str
-    site: Site | None = None  # set for CALL / AFTER_CALL
-
-
-@dataclass(frozen=True)
-class CFGEdge:
-    """Edge between two points of one CFG; `kind` is FLOW, TRUE, FALSE, EXC or CALL_TO_RETURN."""
-
-    src: int
-    dst: int
-    kind: str = FLOW
-
-
-@dataclass(frozen=True, eq=False)
-class CFG:
-    """Control-flow graph of one function's body.
-
-    It does not depend on contexts: every node of the function shares it. `calls` maps each
-    syntactic call site to its (CALL point, AFTER_CALL point) pair.
-    """
-
-    func: FuncId
-    nodes: tuple[CFGNode, ...]
-    edges: tuple[CFGEdge, ...]
-    calls: dict[Site, tuple[int, int]]  # site -> (CALL point, AFTER_CALL point)
-    entry: int = 0
-    exit: int = 1
-
-    def succ(self, i: int) -> list[CFGEdge]:
-        """Return the edges leaving point `i`."""
-        return self._adj()[0].get(i, [])
-
-    def pred(self, i: int) -> list[CFGEdge]:
-        """Return the edges entering point `i`."""
-        return self._adj()[1].get(i, [])
-
-    def _adj(self):
-        """Return the outgoing and incoming edges of every point, built once and then cached."""
-        adj = self.__dict__.get("_adj_cache")
-        if adj is None:
-            out: dict[int, list[CFGEdge]] = {}
-            inc: dict[int, list[CFGEdge]] = {}
-            for e in self.edges:
-                out.setdefault(e.src, []).append(e)
-                inc.setdefault(e.dst, []).append(e)
-            adj = (out, inc)
-            object.__setattr__(self, "_adj_cache", adj)
-        return adj
-
-
-@dataclass(frozen=True)
-class IEdge:
-    """ICFG edge from point `src_pt` of node `src` to point `dst_pt` of node `dst`.
-
-    kind  an intraprocedural kind when `src` is `dst`; CALL_EDGE from a CALL point to the callee's
-          entry; or RETURN_EDGE from the callee's exit to the AFTER_CALL point of the same caller
-          node, so a return goes back only to the context that made the call
-    site  the call site of a CALL_EDGE or RETURN_EDGE, else None
-    """
-
-    src: Node
-    src_pt: int
-    dst: Node
-    dst_pt: int
-    kind: str
-    site: Site | None = None

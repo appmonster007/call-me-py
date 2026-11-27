@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 
+from ..model import Node, Site, token_label
 from .callgraph import CallGraph
-from .model import Node, Site, token_label
 
 
 def _site(s: Site) -> dict[str, int | str]:

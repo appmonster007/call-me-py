@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from callme.extract import build_program, parse_file
-from callme.solver import solve, step
-from callme.transfer import analyze
+from callme.analysis import analyze, solve, step
+from callme.frontend import build_program, parse_file
 
 CASES = sorted((Path(__file__).resolve().parent.parent / "examples" / "cases").glob("*/*.py"))  # single-file cases of every family
 
@@ -75,15 +74,11 @@ def test_conflicting_flow_sensitivity_rejected() -> None:
 # ------------------------------------------------------------ program identity
 from callme import CallGraphPass, analyze_file, run_passes
 from callme.__main__ import main as cli
-from callme.callgraph import build_callgraph
-from callme.extract import Program
-from callme.icfg import icfg_from_state
+from callme.analysis import Facts, PassState, State, init_state
+from callme.frontend import Program
 from callme.model import FuncId
-from callme.pipeline import Facts, PassState
-from callme.persist import (facts_from_dict, facts_to_dict, load_state, save_state,
-                            state_from_dict, state_to_dict)
-from callme.solver import init_state
-from callme.transfer import State
+from callme.output import (build_callgraph, facts_from_dict, facts_to_dict, icfg_from_state,
+                           load_state, save_state, state_from_dict, state_to_dict)
 
 SRC = "def f(): pass\nf()\n"
 

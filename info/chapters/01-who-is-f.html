@@ -38,17 +38,17 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/model.py::Closure"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Closure"></code-ref></dt>
         <dd>the token for a user function: which function, created while which node was running</dd>
-        <dt><code-ref sym="callme/model.py::Vals"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Vals"></code-ref></dt>
         <dd>an abstract value: a frozenset of tokens</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.eval"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/expressions.py::ExprLayer.eval"></code-ref></dt>
         <dd>evaluates an expression by dispatching on its AST type: <code>e_Name</code>, <code>e_Call</code>, …</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.lookup"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.lookup"></code-ref></dt>
         <dd>a name's value: the local env, then enclosing functions, then builtins</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.e_Call"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/expressions.py::ExprLayer.e_Call"></code-ref></dt>
         <dd>evaluates the callee and the arguments, then applies</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.apply"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/calls.py::CallLayer.apply"></code-ref></dt>
         <dd>for each token in the callee's set: bind the arguments, record the edge, use its return value</dd>
       </dl>
     </section>

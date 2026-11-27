@@ -42,13 +42,13 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/callgraph.py::build_callgraph"></code-ref></dt>
+        <dt><code-ref sym="callme/output/callgraph.py::build_callgraph"></code-ref></dt>
         <dd>solver state → <code>CallGraph</code>: nodes, sorted edges, a unique label per node</dd>
-        <dt><code-ref sym="callme/callgraph.py::CallGraph.function_edges"></code-ref></dt>
+        <dt><code-ref sym="callme/output/callgraph.py::CallGraph.function_edges"></code-ref></dt>
         <dd>the context-insensitive view: (caller, callee) function pairs</dd>
-        <dt><code-ref sym="callme/export.py::to_dict"></code-ref></dt>
+        <dt><code-ref sym="callme/output/export.py::to_dict"></code-ref></dt>
         <dd>JSON: functions, call sites with targets, edges, contexts, context edges</dd>
-        <dt><code-ref sym="callme/export.py::to_dot"></code-ref></dt>
+        <dt><code-ref sym="callme/output/export.py::to_dot"></code-ref></dt>
         <dd>Graphviz DOT; <code>--contexts</code> draws one box per node</dd>
         <dt><code-ref sym="tests/test_examples.py::test_sound"></code-ref></dt>
         <dd>expected ⊆ found</dd>

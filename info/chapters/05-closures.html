@@ -36,17 +36,17 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/model.py::Closure"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Closure"></code-ref></dt>
         <dd><code>func</code> plus <code>parent</code>, the node it was created in: the tether</dd>
-        <dt><code-ref sym="callme/transfer.py::mk_closure"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::mk_closure"></code-ref></dt>
         <dd>creates the token, and drops the tether past <code>MAX_DEPTH</code></dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.s_FunctionDef"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/definitions.py::DefLayer.s_FunctionDef"></code-ref></dt>
         <dd>a <code>def</code> statement: evaluate decorators, bind the name to the token</dd>
-        <dt><code-ref sym="callme/transfer.py::State.resolve"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State.resolve"></code-ref></dt>
         <dd>calling a closure makes its <code>parent</code> the new node's <code>ctx.parent</code></dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.lookup"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.lookup"></code-ref></dt>
         <dd>a free name walks up <code>ctx.parent</code>, one enclosing function at a time</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.bind"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.bind"></code-ref></dt>
         <dd>where an assignment goes: local env, class namespace, or <code>State.extern</code> for global / nonlocal</dd>
       </dl>
     </section>

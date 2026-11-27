@@ -1,6 +1,6 @@
 """Step 1b: one control-flow graph per function (module body, def, lambda).
 
-Program points (see model.py for the kinds):
+Program points (see `model.graphs` for the kinds):
   entry, exit       one each per function
   stmt              a statement's own effect, after the calls inside it
   branch            a test; successors are labelled true / false
@@ -20,7 +20,7 @@ leaving a `try ... finally` run the finally block first. Implicit exceptions
 outside any `try` are not modelled.
 
 Every statement gets a node even when unreachable (dead code), because the call
-graph analysis still reports call sites in dead code (see transfer.Interp.block).
+graph analysis still reports call sites in dead code (see `Interp.block`).
 """
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ import ast
 from collections.abc import Callable, Iterable, Sequence
 from typing import final
 
-from .model import (AFTER_CALL, BRANCH, CALL, CALL_TO_RETURN, CFG, CFGEdge, CFGNode,
-                    ENTRY, EXC, EXIT, FALSE, FLOW, HANDLER, LOOP, STMT, TRUE, FuncId, Site)
+from ..model import (AFTER_CALL, BRANCH, CALL, CALL_TO_RETURN, CFG, CFGEdge, CFGNode,
+                     ENTRY, EXC, EXIT, FALSE, FLOW, HANDLER, LOOP, STMT, TRUE, FuncId, Site)
 
 FUNC_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 COMPS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
@@ -87,7 +87,7 @@ class Builder:
         """Create the entry and exit points and set the frontier to the entry.
 
         fid        function whose body is being built
-        make_site  `extract.make_site`, used to give each call point its `Site`
+        make_site  `sites.make_site`, used to give each call point its `Site`
         """
         self.fid, self.make_site = fid, make_site
         self.nodes: list[CFGNode] = []
@@ -216,7 +216,7 @@ class Builder:
         """Emit the CALL and AFTER_CALL points of `site`, joined by a call-to-return edge.
 
         The ICFG later adds call edges out of the CALL point and return edges into the AFTER_CALL
-        point. `site` must be the `Site` that `extract.make_site` gives the same node.
+        point. `site` must be the `Site` that `sites.make_site` gives the same node.
         """
         c = self.emit(CALL, node, site.text, site)
         self.frontier = [(c, CALL_TO_RETURN)]
@@ -467,7 +467,7 @@ def build_cfg(fid: FuncId, node: ast.AST, body: Sequence[ast.AST],
     node       its AST node: the module, a def or a lambda
     body       the statements to run; a lambda's body expression is used instead, followed by
                an implicit `return`
-    make_site  `extract.make_site`, so that call points get the same `Site` as the analysis
+    make_site  `sites.make_site`, so that call points get the same `Site` as the analysis
     """
     b = Builder(fid, make_site)
     if isinstance(node, ast.Lambda):

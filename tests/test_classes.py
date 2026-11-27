@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from callme import analyze_source, to_dict, to_dot
-from callme.extract import build_program, call_sites
+from callme.frontend import build_program, call_sites
 
 pytestmark = pytest.mark.family("classes")
 

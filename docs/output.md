@@ -155,7 +155,7 @@ a call into an unknown import. Listing those sites is a quick way to find blind 
 
 To render: `dot -Tsvg graph.dot -o graph.svg` (Graphviz).
 
-## Saved state (`callme/persist.py`)
+## Saved state (`callme/output/persist.py`)
 
 `--save-state` and `persist.save_state` write the solver `State` as JSON (`persist.StateDoc`):
 

@@ -14,7 +14,7 @@
   <div class="prose">
     <h1>Teaching it the builtins</h1>
     <p class="lede"><code>map(square, xs)</code> calls <code>square</code>, but <code>map</code> is
-      written in C. The analyzer can't read it, so <code>stubs.py</code> tells it what each builtin
+      written in C. The analyzer can't read it, so <code>stubs/</code> tells it what each builtin
       does with its arguments.</p>
   </div>
 
@@ -26,7 +26,7 @@
       answers to. Bare names are builtins; dotted names are reached through imports of the modules in
       <code>STUB_MODULES</code>; methods of builtin containers go through <code>METHOD_STUBS</code>.
       This is a whole stub:</p>
-    <code-snippet sym="callme/stubs.py::_starmap"></code-snippet>
+    <code-snippet sym="callme/stubs/itertools.py::_starmap"></code-snippet>
     <p>Callbacks are invoked with <code>call(it, …, site)</code>, at the builtin's own call site.</p>
 
     <details class="ponder">
@@ -40,23 +40,23 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/stubs.py::stub"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/registry.py::stub"></code-ref></dt>
         <dd>decorator registering a stub under one or more names</dd>
-        <dt><code-ref sym="callme/stubs.py::Args"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/registry.py::Args"></code-ref></dt>
         <dd>a call's abstract arguments, with <code>get</code>, <code>kw</code>, <code>rest</code> helpers</dd>
-        <dt><code-ref sym="callme/stubs.py::_map"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/builtins.py::_map"></code-ref></dt>
         <dd><code>map(f, *iterables)</code>: call <code>f</code> with the elements</dd>
-        <dt><code-ref sym="callme/stubs.py::_sorted"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/builtins.py::_sorted"></code-ref></dt>
         <dd><code>sorted(xs, key=k)</code>: call <code>k</code>, then compare with <code>__lt__</code></dd>
-        <dt><code-ref sym="callme/stubs.py::_partial"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/functools.py::_partial"></code-ref></dt>
         <dd>builds the <code>&lt;partial&gt;</code> token that carries <code>f</code> and its bound arguments</dd>
-        <dt><code-ref sym="callme/stubs.py::_call_partial"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/functools.py::_call_partial"></code-ref></dt>
         <dd>calling a partial: bound arguments first, then the call's own</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.apply"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/calls.py::CallLayer.apply"></code-ref></dt>
         <dd>the <code>Builtin</code> branch: deref the arguments, run the stub</dd>
-        <dt><code-ref sym="callme/stubs.py::BUILTIN_NAMES"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/__init__.py::BUILTIN_NAMES"></code-ref></dt>
         <dd>names that <code>lookup</code> falls back to when nothing shadows them</dd>
-        <dt><code-ref sym="callme/stubs.py::METHOD_STUBS"></code-ref></dt>
+        <dt><code-ref sym="callme/stubs/registry.py::METHOD_STUBS"></code-ref></dt>
         <dd><code>xs.sort(key=…)</code>, <code>d.get(…)</code>, <code>d.values()</code>…</dd>
       </dl>
     </section>

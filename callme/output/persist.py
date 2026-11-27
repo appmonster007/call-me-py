@@ -16,8 +16,9 @@ import os
 from collections.abc import Callable, Iterable, Mapping
 from typing import Literal, TypedDict, cast
 
-from .extract import Program
-from .model import (
+from ..analysis import Env, Facts, PassState, State
+from ..frontend import Program
+from ..model import (
     Alloc,
     BoundMethod,
     Box,
@@ -40,8 +41,6 @@ from .model import (
     Token,
     Vals,
 )
-from .pipeline import Facts, PassState
-from .transfer import Env, State
 
 FORMAT, VERSION = "callme-state", 5  # v3: flow_sensitive; v4: module tokens; v5: writes, unknown_decos
 

@@ -423,9 +423,9 @@ def test_unknown_decorator_falls_back_to_identity_after_convergence() -> None:
 
 def test_unknown_decorator_is_context_sensitive_and_persists() -> None:
     import json
-    from callme.extract import build_program
-    from callme.persist import state_from_dict, state_to_dict
-    from callme.solver import init_state, solve, step
+    from callme.analysis import init_state, solve, step
+    from callme.frontend import build_program
+    from callme.output import state_from_dict, state_to_dict
 
     src = textwrap.dedent("""\
         from thirdparty import ext_deco

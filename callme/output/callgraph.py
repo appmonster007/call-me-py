@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .extract import Program, call_sites
+from ..analysis import State
+from ..frontend import Program, call_sites
+from ..model import Edge, FuncId, Node, Site, token_label
 from .icfg import ICFG, build_icfg
-from .model import Edge, FuncId, Node, Site, token_label
-from .transfer import State
 
 
 def node_label(node: Node, style: str = "full") -> str:

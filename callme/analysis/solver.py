@@ -15,10 +15,11 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .extract import Program
-from .model import Ctx, Edge, Node
+from ..frontend import Program
+from ..model import EMPTY, Ctx, Edge, Node
+from .interp import analyze
 from .pipeline import Facts, PassState, run_passes
-from .transfer import EMPTY, State, analyze
+from .state import State
 
 DEFAULT_MAX_CONTEXTS = 16
 
@@ -103,7 +104,7 @@ def step(prog: Program, state: State) -> State:
 
 @dataclass
 class CallGraphPass:
-    """The call graph analysis as a pipeline pass, whose state is a `transfer.State`.
+    """The call graph analysis as a pipeline pass, whose state is a `State`.
 
     The fields are passed to `init_state`; None for `max_contexts` or `flow_sensitive` means
     the default for a new state, or the value of a state being resumed.
@@ -137,7 +138,7 @@ def solve(prog: Program, state: State | None = None, *, include_unreachable: boo
     values, and a different value raises `ValueError`.
 
     flow_sensitive  False treats each local as the union of all its bindings, which is
-                    cheaper but less precise (see transfer.py)
+                    cheaper but less precise (see `analysis.interp`)
     max_rounds      maximum number of rounds before raising `RuntimeError`
     on_round        called as `on_round(round, state)` after each round, e.g. to record a trace
     """

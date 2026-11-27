@@ -1,7 +1,7 @@
 """Public API for call-me-py: context-sensitive call graph construction for Python.
 
 Provides the high-level entry points (`analyze_source`, `analyze_file`,
-`analyze_files`) that run the full extract -> solve -> call-graph pipeline, and
+`analyze_files`) that run the full frontend -> solve -> call-graph pipeline, and
 re-exports the core public interface:
   CallGraph                              analysis result (nodes, edges, sites, ICFG)
   to_dict, to_json, to_dot, to_icfg_dot  JSON and Graphviz DOT exporters
@@ -13,18 +13,15 @@ Usage:
   Single pass:   cg = analyze_file("x.py")            # follows x.py's project imports
   Several roots: cg = analyze_files(["a.py", "b.py"], search_path=["src"])
   Chained pass:  cg2 = analyze_file("x.py", state=cg.state, include_unreachable=True)
-  Pipeline:      facts = run_passes(prog, [CallGraphPass(), ...])  # see callme.pipeline
+  Pipeline:      facts = run_passes(prog, [CallGraphPass(), ...])  # see callme.analysis.pipeline
 """
 import os
 from collections.abc import Iterable
 
-from .callgraph import CallGraph, build_callgraph
-from .export import to_dict, to_dot, to_icfg_dot, to_json
-from .extract import build_program, parse_files
-from .persist import load_state, save_state
-from .pipeline import Facts, Pass, run_passes
-from .solver import CallGraphPass, solve
-from .transfer import State
+from .analysis import CallGraphPass, Facts, Pass, State, run_passes, solve
+from .frontend import build_program, parse_files
+from .output import (CallGraph, build_callgraph, load_state, save_state, to_dict, to_dot,
+                     to_icfg_dot, to_json)
 
 
 def analyze_source(source: str, filename: str = "<string>", id_style: str = "full", *,

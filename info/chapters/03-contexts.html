@@ -33,15 +33,15 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/model.py::Ctx"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Ctx"></code-ref></dt>
         <dd>a context: which tokens each parameter may hold, the defining node, and the <code>merged</code> flag</dd>
-        <dt><code-ref sym="callme/model.py::Node"></code-ref></dt>
+        <dt><code-ref sym="callme/model/values.py::Node"></code-ref></dt>
         <dd>(function, context): the unit the solver analyses</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.bind_args"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/calls.py::CallLayer.bind_args"></code-ref></dt>
         <dd>matches a call's arguments to the signature; the result is the callee's context</dd>
-        <dt><code-ref sym="callme/transfer.py::State.resolve"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State.resolve"></code-ref></dt>
         <dd>finds or creates the node; past <code>max_ctx</code> it merges into the widened <code>[*]</code> node</dd>
-        <dt><code-ref sym="callme/callgraph.py::node_label"></code-ref></dt>
+        <dt><code-ref sym="callme/output/callgraph.py::node_label"></code-ref></dt>
         <dd>prints nodes as <code>ident[f={square}]</code> or <code>ident[*]</code></dd>
       </dl>
     </section>

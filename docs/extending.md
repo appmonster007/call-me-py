@@ -6,7 +6,9 @@ Recipes for the usual changes. If you do not know the module layout yet, read
 ## Add a stub for a builtin or library function
 
 Write a stub when a builtin or stdlib function should reach the callbacks it receives, or
-should return something callable. Stubs live in `callme/stubs.py`:
+should return something callable. Stubs live in `callme/stubs/`, in the module named after
+the function's library (`builtins.py`, `objects.py` and `containers.py` for builtins), for
+example `stubs/itertools.py`:
 
 ```python
 @stub("itertools.starmap")
@@ -19,7 +21,8 @@ def _starmap(it: Host, a: Args, site: Site) -> Vals:
   - A name without a dot is a builtin. It is found by name unless the user shadows it, and is
     added to `BUILTIN_NAMES` automatically.
   - `module.name` is reached via `import module` or `from module import name`. A new module
-    must also be added to `STUB_MODULES`. A project file with the same module name wins over
+    must also be added to `STUB_MODULES` (in `registry.py`), and its stub file to the imports
+    and `MODULES` in `stubs/__init__.py`, after the files it imports helpers from. A project file with the same module name wins over
     the stub module, as it would in Python.
   - `<name>` is an internal token that user code cannot name.
   - One function may register several names.
@@ -40,25 +43,27 @@ def _starmap(it: Host, a: Args, site: Site) -> Vals:
   `functools.partial` does.
 - **Methods of builtin values.** Add `"attr": "stub.name"` to `METHOD_STUBS`; the receiver is
   bound as the first argument.
-- **Stay finite.** Drop or widen tokens that could nest without bound (`_shallow`,
+- **Stay finite.** Drop or widen tokens that could nest without bound (`shallow`,
   `MAX_PARTIAL_DEPTH`).
 
 ## Support a new piece of syntax
 
 Two places need the change, and both dispatch on the AST node's type name:
 
-1. **CFG** (`callme/cfg.py`). Statements use `Builder.s_<Stmt>`; the fallback evaluates the
+1. **CFG** (`callme/frontend/cfg.py`). Statements use `Builder.s_<Stmt>`; the fallback evaluates the
    child expressions and emits one `stmt` point. Expressions use `Builder.expr`. Every
    `ast.Call` and every decorator must become a call point, in evaluation order, through
    `call_point(node, make_site(...))`.
-2. **Analysis** (`callme/transfer.py`). Expressions use `Interp.e_<Expr>`, which returns
+2. **Analysis** (`callme/analysis/interp/`). Expressions use `Interp.e_<Expr>`, which returns
    `Vals`; the fallback `generic` evaluates the children and returns `EMPTY`. Statements use
    `Interp.s_<Stmt>`, with `generic_stmt` as the fallback. In flow mode, alternative paths go
-   through `_path` and `_meet`, and loops through `_loop`.
+   through `_path` and `_meet`, and loops through `_loop`. Put the method in the layer that
+   matches it (expressions, operators, statements, definitions or control flow; see the layer
+   table in [architecture.md](architecture.md)); it may call anything in the layers below.
 
 Rules:
 
-- **Sites.** Build sites with `extract.make_site(caller, node, kind)`, so that the
+- **Sites.** Build sites with `frontend.make_site(caller, node, kind)`, so that the
   interpreter's `Site` equals the CFG's. Implicit calls use one of the non-syntactic kinds
   (`op`, `attr`, `iter`, `with`, `class`), because they have no CFG point.
 - **Writes.** Write state only through the `State` helpers (`add_*`, `register`, `resolve`),
@@ -75,8 +80,8 @@ feed each other reach a joint fixpoint.
 ```python
 from dataclasses import dataclass, field
 from callme import CallGraphPass, run_passes
-from callme.extract import parse_file
-from callme.transfer import State
+from callme.analysis import State
+from callme.frontend import parse_file
 
 @dataclass
 class Reached:                       # a pass state needs copy() and same_result()
@@ -97,7 +102,7 @@ class ReachedPass:
 facts = run_passes(parse_file("app.py"), [CallGraphPass(), ReachedPass()])
 ```
 
-Rules, from the docstring of `pipeline.py`:
+Rules, from the docstring of `analysis/pipeline.py`:
 
 - `init` is idempotent: given an existing state, it only validates it and adds roots.
 - `step` only joins, so results never shrink.

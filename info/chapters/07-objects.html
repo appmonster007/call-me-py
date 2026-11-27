@@ -42,23 +42,23 @@
     <section class="in-code">
       <h2>In the code</h2>
       <dl>
-        <dt><code-ref sym="callme/transfer.py::Interp.s_ClassDef"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/definitions.py::DefLayer.s_ClassDef"></code-ref></dt>
         <dd>runs a class body into its attribute table; records bases, metaclass, decorators</dd>
-        <dt><code-ref sym="callme/transfer.py::State.mro"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/state.py::State.mro"></code-ref></dt>
         <dd>C3 linearisation over the user classes</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.instantiate"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/calls.py::CallLayer.instantiate"></code-ref></dt>
         <dd>calling a class: <code>__new__</code>, then <code>__init__</code> on the new Instance</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.attribute"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/attributes.py::AttributeLayer.attribute"></code-ref></dt>
         <dd>an attribute read: instance fields, MRO lookup, descriptors, properties, <code>__getattr__</code></dd>
-        <dt><code-ref sym="callme/transfer.py::_bind_attr"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/base.py::bind_attr"></code-ref></dt>
         <dd>descriptor binding: function → bound method; classmethod; staticmethod</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.invoke_dunder"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.invoke_dunder"></code-ref></dt>
         <dd>calls a special method on every Instance whose class defines it</dd>
-        <dt><code-ref sym="callme/transfer.py::BINOP_DUNDERS"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/operators.py::BINOP_DUNDERS"></code-ref></dt>
         <dd>operator → <code>__op__</code>, <code>__rop__</code>, <code>__iop__</code></dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.s_With"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/flow.py::FlowLayer.s_With"></code-ref></dt>
         <dd><code>with</code>: <code>__enter__</code> in, <code>__exit__</code> out</dd>
-        <dt><code-ref sym="callme/transfer.py::Interp.iterate"></code-ref></dt>
+        <dt><code-ref sym="callme/analysis/interp/names.py::NameLayer.iterate"></code-ref></dt>
         <dd><code>for</code> and comprehensions: <code>__iter__</code>, then <code>__next__</code></dd>
       </dl>
     </section>
