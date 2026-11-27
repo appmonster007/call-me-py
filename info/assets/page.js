@@ -4,7 +4,7 @@
  *   Docs.STAGES     the analyzer pipeline shown in the header; a chapter highlights its stage(s)
  *   header, prev/next pager, theme toggle (built on DOMContentLoaded from <body data-chapter>)
  *   <code-ref sym="callme/transfer.py::Interp.apply">   link to real code; the snippet comes from
- *                    generated data, and docs/build.py fails if the symbol no longer exists
+ *                    generated data, and info/build.py fails if the symbol no longer exists
  *   <code-snippet sym="callme/stubs.py::_map">         the same real code, shown inline
  *
  * Load order on a page: core.js, views.js, page.js in <head>; generated/data.js and the chapter
@@ -69,7 +69,7 @@
   window.addEventListener("error", (e) => {
     const banner = el("div", { class: "error-banner", role: "alert" },
       el("strong", null, "This page hit an error: "), e.message,
-      el("div", { class: "small" }, "If the analyzer changed, run python docs/build.py and update the chapter."));
+      el("div", { class: "small" }, "If the analyzer changed, run python info/build.py and update the chapter."));
     (document.querySelector("main") || document.body).prepend(banner);
   });
 
@@ -193,7 +193,7 @@
   /** Real source of a symbol, from generated data (scripts may read it too: Docs.snippet). */
   Docs.snippet = (sym) => {
     const ref = window.DOCS_DATA.refs[sym];
-    if (!ref || !ref.code) throw new Error(`no snippet for ${sym}: is it named in some page's sym attribute? run python docs/build.py`);
+    if (!ref || !ref.code) throw new Error(`no snippet for ${sym}: is it named in some page's sym attribute? run python info/build.py`);
     return ref;
   };
 
@@ -218,7 +218,7 @@
       const label = this.textContent.trim() || qual;
       const ref = window.DOCS_DATA && window.DOCS_DATA.refs[sym];
       const btn = el("button", { class: `ref-btn ${ref ? "" : "missing"}`.trim(), type: "button",
-        title: ref ? `${ref.file}:${ref.line}` : "not in generated data: run python docs/build.py" },
+        title: ref ? `${ref.file}:${ref.line}` : "not in generated data: run python info/build.py" },
         el("span", { class: "ref-file" }, path.split("/").pop()),
         label ? el("span", { class: "ref-sym" }, label) : null);
       if (ref) btn.addEventListener("click", () => openRef(sym));

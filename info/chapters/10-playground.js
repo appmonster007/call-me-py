@@ -62,7 +62,7 @@
         : el("span", { class: "muted" }, "nothing"))));
   }
 
-  /** A build-time run (docs/build.py) in the shape of export.to_dict. */
+  /** A build-time run (info/build.py) in the shape of export.to_dict. */
   function recorded(key) {
     const ex = DATA.examples[key];
     const run = ex.runs["16"] || Object.values(ex.runs)[0];

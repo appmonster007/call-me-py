@@ -1,4 +1,4 @@
-/* Chapter 1: who does f() call?  Example: docs/examples/basics.py
+/* Chapter 1: who does f() call?  Example: info/examples/basics.py
  *
  * Scene "names":  reading names dead-ends at the parameter f.
  * Scene "values": evaluating on sets of tokens resolves it (envs and edges from the real run).

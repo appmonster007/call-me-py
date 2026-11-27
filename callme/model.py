@@ -20,6 +20,11 @@ Vocabulary:
   Edge         call edge between two nodes at a syntactic call site
   CFG          per-function control-flow graph over program points (CFGNode)
   IEdge        ICFG edge between program points of two (function, context) nodes
+
+Tokens, `Ctx` and `Node` are frozen dataclasses that compute their hash once, in
+`__post_init__`, and keep it in `_h`, because they are hashed in every set operation.
+A token's `depth` says how deeply other tokens nest inside it; the analysis drops or
+widens tokens that nest too deeply, which keeps every value finite.
 """
 from __future__ import annotations
 
@@ -30,10 +35,10 @@ from typing import override
 
 @dataclass(frozen=True)
 class _SymId:
-    """Shared identity layout for functions and classes; strings are built on demand.
+    """Identity layout shared by functions and classes; the string forms are built on demand.
 
-    file      source path as given (e.g. "pkg/util.py")
-    qualname  dotted scope path of the definition (e.g. "Outer.make.inner")
+    file      source path as given, e.g. "pkg/util.py"
+    qualname  dotted scope path of the definition, e.g. "Outer.make.inner"
     lineno    1-based line of the definition
     col       0-based column of the definition
     """
@@ -45,17 +50,20 @@ class _SymId:
 
     @property
     def name(self) -> str:
-        """Last component of the qualname ("inner")."""
+        """Return the last part of the qualname, e.g. "inner" for "Outer.make.inner"."""
         return self.qualname.rsplit(".", 1)[-1]
 
     @property
     def scope(self) -> str:
-        """Enclosing scope part of the qualname ("Outer.make"), "" at top level."""
+        """Return the qualname without its last part, e.g. "Outer.make", or "" at top level."""
         return self.qualname.rpartition(".")[0]
 
     @property
     def module(self) -> str:
-        """Dotted module name derived from the file path ("pkg.util")."""
+        """Return the dotted module name derived from the file path, e.g. "pkg.util".
+
+        A trailing `__init__` is dropped. If no name is left, the file path is returned as is.
+        """
         parts = PurePath(self.file).with_suffix("").parts
         parts = tuple(p for p in parts if p not in ("/", ".", ".."))
         if parts and parts[-1] == "__init__":
@@ -64,12 +72,17 @@ class _SymId:
 
     @property
     def uid(self) -> str:
-        """Unique id: file:line:col:qualname (stable even when names repeat)."""
+        """Return the "full" form `file:line:col:qualname`, unique even when names repeat."""
         return self.render("full")
 
     def render(self, style: str = "full") -> str:
-        """Build the string form: "full" = file:line:col:qualname, "module" =
-        module.qualname, "short" = qualname."""
+        """Return this id as a string in the given style.
+
+        style  "full" (file:line:col:qualname, always unique), "module" (module.qualname) or
+               "short" (qualname alone, which can collide)
+
+        Raises `ValueError` for any other style.
+        """
         if style == "full":
             return f"{self.file}:{self.lineno}:{self.col}:{self.qualname}"
         if style == "module":
@@ -85,7 +98,7 @@ class _SymId:
 
 @dataclass(frozen=True)
 class FuncId(_SymId):
-    """Identity of one function (def, async def, lambda or module body)."""
+    """Identity of one function: a def, async def, lambda or the module body (`<module>`)."""
 
 
 @dataclass(frozen=True)
@@ -95,10 +108,12 @@ class ClassId(_SymId):
 
 @dataclass(frozen=True)
 class Closure:
-    """Token: function `func` created while `parent` was running.
+    """Token for the function `func`, created while the node `parent` was running.
 
-    `parent` is None when the defining context is unknown or was widened to keep
-    the analysis finite; free variables are then read from every context.
+    The parent decides which context the closure's free variables are read from. It is None when
+    the defining context is unknown, or when keeping it would nest contexts deeper than
+    `transfer.MAX_DEPTH`; free variables are then read from every context of the enclosing
+    function. `depth` counts how many closures are nested through `parent`'s context.
     """
 
     func: FuncId
@@ -116,10 +131,12 @@ class Closure:
 
 @dataclass(frozen=True)
 class Builtin:
-    """Token: a builtin or stdlib callable (or stub module) modelled in stubs.py.
+    """Token for a builtin or stdlib callable, or a stub module, modelled by a stub in stubs.py.
 
-    `bound` / `bound_kw` are pre-bound arguments prepended to every call: the
-    receiver of a builtin method (`list.sort`) or the arguments of a partial.
+    name      stub name, e.g. "map", "functools.partial", or "<partial>" for an internal token
+    bound     argument values prepended to every call: the receiver of a builtin method such
+              as `list.sort`, or the function and positional arguments of a partial
+    bound_kw  keyword arguments bound the same way, as (name, values) pairs
     """
 
     name: str
@@ -129,6 +146,7 @@ class Builtin:
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the deepest bound token, and cache the hash."""
         toks = [t for v in self.bound for t in v] + [t for _, v in self.bound_kw for t in v]
         if toks:
             object.__setattr__(self, "depth", 1 + max(t.depth for t in toks))
@@ -141,7 +159,7 @@ class Builtin:
 
 @dataclass(frozen=True)
 class ClassObj:
-    """Token: a class object."""
+    """Token for the class object of `cls`."""
 
     cls: ClassId
     depth: int = field(default=0, compare=False)
@@ -157,7 +175,7 @@ class ClassObj:
 
 @dataclass(frozen=True)
 class Alloc:
-    """Allocation site: the expression in function `func` that creates an object."""
+    """Allocation site: where in function `func` the expression that creates an object is."""
 
     func: FuncId
     line: int
@@ -165,16 +183,16 @@ class Alloc:
 
     @classmethod
     def of(cls, site: Site) -> Alloc:
-        """Allocation site of an object created by the call at `site`."""
+        """Return the allocation site of an object created by the call at `site`."""
         return cls(site.caller, site.line, site.col)
 
 
 @dataclass(frozen=True)
 class Instance:
-    """Token: an abstract instance of `cls` created at `alloc` (None = unknown site).
+    """Token for the instances of `cls` created at `alloc`, or at an unknown site when it is None.
 
-    Instance attributes are stored per token (State.inst_attrs), so two objects of
-    the same class created at different sites keep separate fields.
+    Instance attributes are stored per token in `State.inst_attrs`, so objects of the same class
+    created at different sites keep separate fields.
     """
 
     cls: ClassId
@@ -192,7 +210,7 @@ class Instance:
 
 @dataclass(frozen=True)
 class BoundMethod:
-    """Token: callable `func` with `receiver` pre-bound as first argument."""
+    """Token for the callable `func` with `receiver` bound as its first argument."""
 
     func: Token
     receiver: ClassObj | Instance
@@ -200,6 +218,7 @@ class BoundMethod:
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the deeper of `func` and `receiver`, and cache the hash."""
         object.__setattr__(self, "depth", 1 + max(self.func.depth, self.receiver.depth))
         object.__setattr__(self, "_h", hash(("bound", self.func, self.receiver)))
 
@@ -210,13 +229,14 @@ class BoundMethod:
 
 @dataclass(frozen=True)
 class ClassMethod:
-    """Token: `classmethod(func)` descriptor binding the owner class as first arg."""
+    """Token for `classmethod(func)`, a descriptor that binds the owner class as first argument."""
 
     func: Token
     depth: int = field(default=0, compare=False)
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the depth of `func`, and cache the hash."""
         object.__setattr__(self, "depth", 1 + self.func.depth)
         object.__setattr__(self, "_h", hash(("classmethod", self.func)))
 
@@ -227,13 +247,14 @@ class ClassMethod:
 
 @dataclass(frozen=True)
 class StaticMethod:
-    """Token: `staticmethod(func)` descriptor returning `func` unbound."""
+    """Token for `staticmethod(func)`: a descriptor that returns `func` without binding it."""
 
     func: Token
     depth: int = field(default=0, compare=False)
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the depth of `func`, and cache the hash."""
         object.__setattr__(self, "depth", 1 + self.func.depth)
         object.__setattr__(self, "_h", hash(("staticmethod", self.func)))
 
@@ -244,7 +265,7 @@ class StaticMethod:
 
 @dataclass(frozen=True)
 class Super:
-    """Token: `super(start, receiver)` proxy searching `receiver`'s MRO after `start`."""
+    """Token for `super(start, receiver)`: attribute lookup in `receiver`'s MRO after `start`."""
 
     start: ClassId
     receiver: ClassObj | Instance
@@ -252,6 +273,7 @@ class Super:
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the depth of `receiver`, and cache the hash."""
         object.__setattr__(self, "depth", 1 + self.receiver.depth)
         object.__setattr__(self, "_h", hash(("super", self.start, self.receiver)))
 
@@ -262,7 +284,7 @@ class Super:
 
 @dataclass(frozen=True)
 class Property:
-    """Token: `property(fget, fset, fdel)` descriptor."""
+    """Token for `property(fget, fset, fdel)`; each accessor is the set of functions it may be."""
 
     fget: frozenset[Token] = frozenset()
     fset: frozenset[Token] = frozenset()
@@ -271,6 +293,7 @@ class Property:
     _h: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Set `depth` to one more than the deepest accessor token, and cache the hash."""
         toks = [*self.fget, *self.fset, *self.fdel]
         if toks:
             object.__setattr__(self, "depth", 1 + max(t.depth for t in toks))
@@ -283,11 +306,11 @@ class Property:
 
 @dataclass(frozen=True)
 class Box:
-    """Token: the mutable container (`kind` = list / dict / set) created at `alloc`.
+    """Token for the mutable container of `kind` "list", "dict" or "set" created at `alloc`.
 
-    Values stay collapsed: a container literal evaluates to its elements plus its
-    Box. What is stored into the container later (`xs.append(f)`, `d[k] = f`) goes
-    to State.heap[box], so every alias of the container sees it (State.deref).
+    Values stay collapsed: a container literal evaluates to its elements plus its Box. Values
+    stored into the container later, as in `xs.append(f)` or `d[k] = f`, are recorded under the
+    box in `State.heap`, so every alias of the container sees them through `State.deref`.
     """
 
     kind: str
@@ -308,7 +331,12 @@ Token = (Closure | Builtin | ClassObj | Instance | BoundMethod
 
 
 def token_label(tok: Token, style: str = "full") -> str:
-    """Printable name of a token."""
+    """Return the printable name of a token, with ids rendered in `style`.
+
+    Closures print as their function id, classes as `<class C>`, instances as `C()@line:col`,
+    boxes as `<list@line:col>` and partials as `<partial:f>`; the other tokens print as calls,
+    e.g. `classmethod(f)` or `super(C, C()@3:0)`.
+    """
     if isinstance(tok, Builtin):
         if tok.bound and tok.name.startswith("<partial"):
             inner = ",".join(sorted(token_label(t, style) for t in tok.bound[0]))
@@ -342,7 +370,15 @@ ParamState = tuple[tuple[str, frozenset[Token]], ...]
 
 @dataclass(frozen=True)
 class Ctx:
-    """Abstract entry state. Only parameters holding functions are recorded."""
+    """Context of a node: the abstract entry state a function is analysed under.
+
+    params  (parameter, tokens) pairs for the parameters that hold tokens, sorted by name;
+            parameters with no tokens are left out, so they do not split contexts
+    parent  the called closure's parent: the node that was running when it was created,
+            or None when that is unknown
+    merged  True for the one widened context of a function that ran out of contexts; its
+            entry state is kept in `State.entry` instead of `params`
+    """
 
     params: ParamState = ()
     parent: Node | None = None
@@ -359,6 +395,8 @@ class Ctx:
 
 @dataclass(frozen=True)
 class Node:
+    """One analysed instance of a function: the function `func` under the context `ctx`."""
+
     func: FuncId
     ctx: Ctx
     _h: int = field(init=False, repr=False, compare=False)
@@ -373,7 +411,13 @@ class Node:
 
 @dataclass(frozen=True)
 class Site:
-    """A syntactic call site (or decorator application)."""
+    """A call site, identified by its caller and source position.
+
+    text  source text of the call, at most 60 characters; decorators start with "@"
+    kind  "call" or "decorator" for syntactic sites, which are CFG call points; "op", "attr",
+          "iter", "with" or "class" for the implicit dunder calls behind operators, attribute
+          access, iteration, `with` and class creation, which have no CFG point
+    """
 
     caller: FuncId
     line: int
@@ -384,6 +428,8 @@ class Site:
 
 @dataclass(frozen=True)
 class Edge:
+    """A call edge: the node `caller` may call the node `callee` at `site`."""
+
     caller: Node
     site: Site
     callee: Node
@@ -407,7 +453,12 @@ CALL_EDGE, RETURN_EDGE = "call", "return"
 
 @dataclass(frozen=True)
 class CFGNode:
-    """One program point of a function body."""
+    """One program point of a function body.
+
+    idx   index of the point in `CFG.nodes`
+    kind  ENTRY, EXIT, STMT, BRANCH, LOOP, HANDLER, CALL or AFTER_CALL
+    site  the call made at a CALL point or returning at its AFTER_CALL point, else None
+    """
 
     idx: int
     kind: str
@@ -419,6 +470,8 @@ class CFGNode:
 
 @dataclass(frozen=True)
 class CFGEdge:
+    """Edge between two points of one CFG; `kind` is FLOW, TRUE, FALSE, EXC or CALL_TO_RETURN."""
+
     src: int
     dst: int
     kind: str = FLOW
@@ -426,8 +479,11 @@ class CFGEdge:
 
 @dataclass(frozen=True, eq=False)
 class CFG:
-    """Control-flow graph of one function. Context independent: every
-    (function, context) node of the analysis shares its function's CFG."""
+    """Control-flow graph of one function's body.
+
+    It does not depend on contexts: every node of the function shares it. `calls` maps each
+    syntactic call site to its (CALL point, AFTER_CALL point) pair.
+    """
 
     func: FuncId
     nodes: tuple[CFGNode, ...]
@@ -437,12 +493,15 @@ class CFG:
     exit: int = 1
 
     def succ(self, i: int) -> list[CFGEdge]:
+        """Return the edges leaving point `i`."""
         return self._adj()[0].get(i, [])
 
     def pred(self, i: int) -> list[CFGEdge]:
+        """Return the edges entering point `i`."""
         return self._adj()[1].get(i, [])
 
     def _adj(self):
+        """Return the outgoing and incoming edges of every point, built once and then cached."""
         adj = self.__dict__.get("_adj_cache")
         if adj is None:
             out: dict[int, list[CFGEdge]] = {}
@@ -457,11 +516,12 @@ class CFG:
 
 @dataclass(frozen=True)
 class IEdge:
-    """ICFG edge from program point `src_pt` of `src` to `dst_pt` of `dst`.
+    """ICFG edge from point `src_pt` of node `src` to point `dst_pt` of node `dst`.
 
-    kind: an intraprocedural kind (src is dst), CALL_EDGE (CALL point -> callee
-    entry) or RETURN_EDGE (callee exit -> AFTER_CALL point of the same caller
-    context, so returns go back only to the context that made the call).
+    kind  an intraprocedural kind when `src` is `dst`; CALL_EDGE from a CALL point to the callee's
+          entry; or RETURN_EDGE from the callee's exit to the AFTER_CALL point of the same caller
+          node, so a return goes back only to the context that made the call
+    site  the call site of a CALL_EDGE or RETURN_EDGE, else None
     """
 
     src: Node

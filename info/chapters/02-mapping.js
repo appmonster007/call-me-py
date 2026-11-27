@@ -1,4 +1,4 @@
-/* Chapter 2: mapping the program (extract.py).  Example: docs/examples/mapping.py
+/* Chapter 2: mapping the program (extract.py).  Example: info/examples/mapping.py
  *
  * One step per function of the generated `program` inventory: its region in the code, its
  * FuncInfo card (id in the chosen style, parent, params, locals, call sites) and its place in

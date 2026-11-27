@@ -1,6 +1,6 @@
 /* Chapter 9: from state to graph, and checking it.
  *
- * Scene "collapse": the context-level graph of docs/examples/basics.py merges into the
+ * Scene "collapse": the context-level graph of info/examples/basics.py merges into the
  *                   function-level graph (GraphView exitTo), next to the real JSON / DOT text.
  * Scene "check":    for each case in build.py's CASES, EXPECTED vs. found as a Venn diagram.
  */

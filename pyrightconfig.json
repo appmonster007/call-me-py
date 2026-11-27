@@ -1,5 +1,5 @@
 {
-  "ignore": ["examples", "docs/examples"],
+  "ignore": ["examples", "info/examples"],
   "reportMissingTypeStubs": "none",
   "reportUnknownMemberType": "none",
   "reportUnusedCallResult": "none",

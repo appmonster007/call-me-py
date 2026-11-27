@@ -15,14 +15,14 @@ the playground (chapter 10) needs internet, to download Pyodide.
 
 ## Keeping it true
 
-The pages never hard-code analyzer results. `docs/build.py` runs the real analyzer on the
-programs in `docs/examples/` and writes everything the scenes show to `generated/data.js`:
+The pages never hard-code analyzer results. `info/build.py` runs the real analyzer on the
+programs in `info/examples/` and writes everything the scenes show to `generated/data.js`:
 contexts, environments, edges, the solver's rounds, class tables, the heap. It also stores the
 source of every code reference and the `callme` package for the playground.
 
 ```sh
-python docs/build.py           # after changing callme/ or docs/
-python docs/build.py --check   # what tests/test_docs.py runs
+python info/build.py           # after changing callme/ or info/
+python info/build.py --check   # what tests/test_docs.py runs
 ```
 
 `tests/test_docs.py` fails when `data.js` is stale, or when a page references a function that no
@@ -65,7 +65,7 @@ assets/style.css          design tokens (both themes) and every component
    });
    ```
 
-5. Run `python docs/build.py` and open the page with `?selftest`.
+5. Run `python info/build.py` and open the page with `?selftest`.
 
 ## Referencing code
 
@@ -76,7 +76,7 @@ assets/style.css          design tokens (both themes) and every component
 ```
 
 `sym` is `path::Dotted.name`: a function, class, method, or module-level assignment.
-`build.py` collects every `sym="…"` in `docs/`, so a rename in `callme/` makes the test fail and
+`build.py` collects every `sym="…"` in `info/`, so a rename in `callme/` makes the test fail and
 names the page to fix. Scripts can read a collected symbol's source with `Docs.snippet(sym)`.
 
 ## Style

@@ -10,6 +10,11 @@ from .transfer import State
 
 
 def node_label(node: Node, style: str = "full") -> str:
+    """Return the printable label of a node, with ids rendered in `style`.
+
+    The label is `f` for a context without function-valued parameters, `f[p={a,b}, q={c}]`
+    listing each parameter's sorted token labels, or `f[*]` for the widened context.
+    """
     c, fn = node.ctx, node.func.render(style)
     if c.merged:
         return f"{fn}[*]"
@@ -22,6 +27,17 @@ def node_label(node: Node, style: str = "full") -> str:
 
 @dataclass(frozen=True, eq=False)
 class CallGraph:
+    """The result of an analysis: context nodes, call edges and call sites, with labels.
+
+    nodes   analysed (function, context) nodes, in discovery order
+    edges   context call edges, sorted by caller, position and callee
+    sites   every syntactic call site of the reachable functions, followed by the implicit
+            sites that got an edge
+    labels  unique printable label per node; labels that would collide get "#1", "#2", ...
+    state   the solver state the graph was built from, to resume or chain later passes
+    style   id style for names: "full", "module" or "short" (see `FuncId.render`)
+    """
+
     prog: Program
     nodes: tuple[Node, ...]
     edges: tuple[Edge, ...]
@@ -31,17 +47,19 @@ class CallGraph:
     style: str = "full"  # id style: full | module | short (see FuncId.render)
 
     def name(self, f: FuncId) -> str:
+        """Return the id of function `f` in the graph's id style."""
         return f.render(self.style)
 
     def reachable(self) -> frozenset[FuncId]:
+        """Return the functions that have at least one analysed node."""
         return frozenset(n.func for n in self.nodes)
 
     def function_edges(self) -> frozenset[tuple[str, str]]:
-        """Context-insensitive view: (caller name, callee name) pairs."""
+        """Return the call edges with contexts merged, as (caller id, callee id) pairs."""
         return frozenset((self.name(e.caller.func), self.name(e.callee.func)) for e in self.edges)
 
     def icfg(self) -> ICFG:
-        """Interprocedural CFG of the analysed (function, context) nodes."""
+        """Return the interprocedural CFG of the analysed nodes, built once and then cached."""
         cached: ICFG | None = self.__dict__.get("_icfg")
         if cached is None:
             cached = build_icfg(self.prog, self.nodes, self.edges)
@@ -49,10 +67,17 @@ class CallGraph:
         return cached
 
     def targets(self, site: Site) -> frozenset[str]:
+        """Return the ids of the functions that the call at `site` may call."""
         return frozenset(self.name(e.callee.func) for e in self.edges if e.site == site)
 
 
 def build_callgraph(prog: Program, state: State, style: str = "full") -> CallGraph:
+    """Build the `CallGraph` of a solved `state`, naming functions in id style `style`.
+
+    Edges are sorted by caller, site position and callee. Syntactic sites come from the
+    reachable functions' CFGs, so a call with no known target is listed too; implicit sites
+    are listed only when they got an edge.
+    """
     nodes = tuple(state.order)
     edges = tuple(sorted(state.edges, key=lambda e: (
         e.caller.func.uid, e.site.line, e.site.col, e.site.kind, node_label(e.callee))))

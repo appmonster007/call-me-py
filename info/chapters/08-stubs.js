@@ -1,4 +1,4 @@
-/* Chapter 8: stubs.  Example: docs/examples/stubs.py
+/* Chapter 8: stubs.  Example: info/examples/stubs.py
  *
  * Each step pairs a line of the example with the real source of the stub that handles it
  * (Docs.snippet reads generated refs; the page's "In the code" list makes build.py collect them).

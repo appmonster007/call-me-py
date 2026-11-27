@@ -1,8 +1,19 @@
-"""python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns] [--icfg]
-                    [--flow-insensitive] [--load-state S] [--save-state S]
+"""Command-line interface for call-me-py (`python -m callme`).
 
-Multi-pass from the shell: --save-state keeps the solver state, --load-state resumes it
-(only for the same, unchanged FILE), e.g. a second run with --include-unreachable."""
+Parses CLI options, runs the call graph analysis on a single Python file, and
+writes the result as JSON, Graphviz DOT, or an interprocedural CFG (ICFG) DOT
+graph. Nothing is written unless `-o`/`--output` is given (except `--print-graph`
+to stderr).
+
+Usage:
+  python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns]
+                               [--icfg] [--flow-insensitive]
+                               [--load-state S] [--save-state S]
+
+Multi-pass from the shell: `--save-state` writes the solver state to JSON and
+`--load-state` resumes it for the same, unchanged FILE (e.g. a second pass with
+`--include-unreachable`).
+"""
 import argparse
 import sys
 from collections.abc import Sequence
@@ -12,7 +23,11 @@ from .extract import call_sites, parse_file
 
 
 def print_graph(cg: CallGraph) -> None:
-    """Step-1 graph: function nesting edges and caller -> call-site edges (to stderr)."""
+    """Write the program's structure, as `cg` names it, to stderr.
+
+    Prints two lists in `cg`'s id style: the lexical nesting of functions
+    (`parent -> child`), then every syntactic call site (`caller -> text @line:col [kind]`).
+    """
     prog, name = cg.prog, cg.name
     err = sys.stderr
     print("# function identifier graph (lexical parent -> child)", file=err)
@@ -25,6 +40,16 @@ def print_graph(cg: CallGraph) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse the command-line arguments, analyse the file, and write the requested outputs.
+
+    Optionally resumes from a saved solver state (`--load-state`), saves the final state
+    (`--save-state`), prints the program structure to stderr (`--print-graph`), and writes
+    JSON, DOT or ICFG DOT to `-o`/`--output`.
+
+    argv  argument list to parse (defaults to `sys.argv[1:]` when None)
+
+    Returns 0 on success.
+    """
     ap = argparse.ArgumentParser(prog="callme", description=__doc__)
     ap.add_argument("file")
     ap.add_argument("--format", choices=["json", "dot", "icfg"], default="json",
@@ -45,7 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--flow-insensitive", dest="flow_sensitive", action="store_const",
                     const=False, default=None,
                     help="treat each local as the union of all its bindings (less precise;"
-                         " default: flow-sensitive, or the loaded state's mode)")
+                         + " default: flow-sensitive, or the loaded state's mode)")
     ap.add_argument("--load-state", metavar="PATH", help="resume from a state saved for this file")
     ap.add_argument("--save-state", metavar="PATH", help="save the solver state after this pass")
     ap.add_argument("-o", "--output", help="write the graph here; without it nothing is printed")

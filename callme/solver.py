@@ -26,7 +26,18 @@ DEFAULT_MAX_CONTEXTS = 16
 def init_state(prog: Program, state: State | None = None, *,
                include_unreachable: bool = False, max_contexts: int | None = None,
                flow_sensitive: bool | None = None) -> State:
-    """Validate/create a state for `prog` and register its root nodes (idempotent)."""
+    """Return a state for `prog` with its root nodes registered, creating it if `state` is None.
+
+    The module body is always a root. With `include_unreachable`, every other function is a
+    root too, analysed with no known arguments, so code that is never called is also covered.
+    Calling it again on its own result changes nothing.
+
+    max_contexts    context budget of a new state (default 16)
+    flow_sensitive  flow mode of a new state (default True)
+
+    For an existing state both must be None or match its own value; any conflict, or a
+    state made for another program, raises `ValueError`.
+    """
     if state is None:
         state = State(DEFAULT_MAX_CONTEXTS if max_contexts is None else max_contexts,
                       prog.fingerprint, True if flow_sensitive is None else flow_sensitive)
@@ -48,7 +59,12 @@ def init_state(prog: Program, state: State | None = None, *,
 
 
 def step(prog: Program, state: State) -> State:
-    """One round over all known nodes, joined into `state` (in place). Sets state.changed."""
+    """Analyse every known node once and join the results into `state`, in place.
+
+    Each node's environment, return value and call edges are joined into the state.
+    `state.changed` is True afterwards if anything grew, including the contexts and tables
+    that `analyze` writes directly. Return `state`.
+    """
     state.changed = False
     for node in list(state.order):
         env, ret, calls = analyze(node, state, prog)
@@ -73,7 +89,11 @@ def step(prog: Program, state: State) -> State:
 
 @dataclass
 class CallGraphPass:
-    """The call graph analysis as a pipeline pass (state: `State`)."""
+    """The call graph analysis as a pipeline pass, whose state is a `transfer.State`.
+
+    The fields are passed to `init_state`; None for `max_contexts` or `flow_sensitive` means
+    the default for a new state, or the value of a state being resumed.
+    """
 
     include_unreachable: bool = False
     max_contexts: int | None = None
@@ -81,12 +101,14 @@ class CallGraphPass:
     name: str = "callgraph"
 
     def init(self, prog: Program, _facts: Facts, state: PassState | None) -> State:
+        """Return the pass state from `init_state`; raise `TypeError` for a non-`State` state."""
         if state is not None and not isinstance(state, State):
             raise TypeError(f"{self.name} state must be a State, not a {type(state).__name__}")
         return init_state(prog, state, include_unreachable=self.include_unreachable,
                           max_contexts=self.max_contexts, flow_sensitive=self.flow_sensitive)
 
     def step(self, prog: Program, facts: Facts) -> bool:
+        """Run one solver round on the call graph state; return True if it changed."""
         return step(prog, facts.get(self.name, State)).changed
 
 
@@ -94,14 +116,16 @@ def solve(prog: Program, state: State | None = None, *, include_unreachable: boo
           max_contexts: int | None = None, flow_sensitive: bool | None = None,
           max_rounds: int = 10_000, inplace: bool = False,
           on_round: Callable[[int, State], None] | None = None) -> State:
-    """Run the call graph pass to a fixpoint, starting from `state` (or an empty one).
+    """Run the call graph pass to a fixpoint, starting from `state` or from an empty state.
 
-    The input state is copied unless `inplace=True`. max_contexts defaults to 16
-    and flow_sensitive to True for a fresh state; both default to the state's own
-    value when one is given (a different value raises ValueError).
-    `flow_sensitive=False` treats each local as the union of all its bindings
-    (see transfer.py): cheaper to reason about, less precise.
-    `on_round(round, state)` (optional) is called after each round, e.g. to record a trace.
+    The input state is copied unless `inplace` is set. `max_contexts` defaults to 16 and
+    `flow_sensitive` to True for a new state; for a given state they default to its own
+    values, and a different value raises `ValueError`.
+
+    flow_sensitive  False treats each local as the union of all its bindings, which is
+                    cheaper but less precise (see transfer.py)
+    max_rounds      maximum number of rounds before raising `RuntimeError`
+    on_round        called as `on_round(round, state)` after each round, e.g. to record a trace
     """
     p = CallGraphPass(include_unreachable, max_contexts, flow_sensitive)
     facts = Facts(prog.fingerprint, {p.name: state} if state is not None else None)

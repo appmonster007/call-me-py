@@ -69,6 +69,14 @@ ROW_LEN = {"node": 5, "clo": 4, "builtin": 4, "class": 2, "inst": 3, "box": 3, "
 
 
 class StateDoc(TypedDict):
+    """JSON layout of a saved `State`, format "callme-state".
+
+    The header (`format`, `version`, `program`, `max_ctx`, `flow_sensitive`) is checked on
+    loading. `values` holds every node and token once, as `Row`s; every other field mirrors
+    the `State` table of the same name and refers to values by index. Function and class
+    ids are stored as uids.
+    """
+
     format: str
     version: int
     program: str | None
@@ -89,6 +97,8 @@ class StateDoc(TypedDict):
 
 
 class FactsDoc(TypedDict):
+    """JSON layout of a saved `Facts` store, format "callme-facts": one document per pass name."""
+
     format: str
     version: int
     program: str
@@ -97,20 +107,30 @@ class FactsDoc(TypedDict):
 
 # ---------------------------------------------------------------- State
 def _alloc(a: Alloc | None) -> AllocRow:
+    """Return the row form of an allocation site: (function uid, line, column), or None."""
     return None if a is None else (a.func.uid, a.line, a.col)
 
 
 class _Encoder:
+    """Builder of the `values` table: gives each node and token one row and one index.
+
+    A value's parts are added before the value itself, so a decoder can rebuild the table
+    in one forward scan.
+    """
+
     def __init__(self) -> None:
+        """Start with an empty table."""
         self.values: list[Row] = []
         self.ids: dict[Node | Token, int] = {}
 
     def _add(self, key: Node | Token, row: Row) -> int:
+        """Append `row` for `key` and return its index."""
         self.ids[key] = len(self.values)
         self.values.append(row)
         return self.ids[key]
 
     def node(self, n: Node) -> int:
+        """Return the index of node `n`, adding its context's tokens and parent first."""
         if n not in self.ids:
             params = self.params(n.ctx.params)
             parent = self.opt_node(n.ctx.parent)
@@ -118,9 +138,15 @@ class _Encoder:
         return self.ids[n]
 
     def opt_node(self, n: Node | None) -> int | None:
+        """Return the index of node `n`, or None when `n` is None."""
         return None if n is None else self.node(n)
 
     def tok(self, t: Token) -> int:  # children first, so decoding is one forward scan
+        """Return the index of token `t`, adding a row for it on first use.
+
+        The row is tagged by the token's kind ("clo", "builtin", "class", ...; see `Row`), and
+        the tokens or nodes it holds are added first.
+        """
         if t in self.ids:
             return self.ids[t]
         row: Row
@@ -148,20 +174,25 @@ class _Encoder:
         return self._add(t, row)
 
     def toks(self, ts: Iterable[Token]) -> Ids:
+        """Return the sorted indices of the tokens in `ts`."""
         return sorted(self.tok(t) for t in ts)
 
     def params(self, ps: ParamState) -> list[tuple[str, Ids]]:
+        """Return a context's parameters as (name, token indices) pairs."""
         return [(name, self.toks(ts)) for name, ts in ps]
 
     def env(self, env: Mapping[str, Vals]) -> EnvDoc:
+        """Return an environment as a dict of token indices, sorted by name."""
         return {k: self.toks(v) for k, v in sorted(env.items())}
 
 
 def _site(s: Site) -> SiteRow:
+    """Return the row form of a call site: (caller uid, line, column, text, kind)."""
     return (s.caller.uid, s.line, s.col, s.text, s.kind)
 
 
 def state_to_dict(state: State) -> StateDoc:
+    """Encode `state` as a JSON-ready `StateDoc`."""
     enc = _Encoder()
     order = [enc.node(n) for n in state.order]
     envs = [(enc.node(n), enc.env(e)) for n, e in state.envs.items()]
@@ -181,7 +212,13 @@ def state_to_dict(state: State) -> StateDoc:
 
 
 def state_from_dict(prog: Program, d: object) -> State:
-    """Decode a `state_to_dict` document (e.g. from `json.load`) for `prog`."""
+    """Decode a `state_to_dict` document, such as one read with `json.load`, for `prog`.
+
+    Function and class uids are resolved against `prog`. Raises `ValueError` if the header
+    is not "callme-state" version 3, if the document was produced for another program or
+    version of it (the fingerprints differ), or if a row is malformed or names an unknown
+    id.
+    """
     doc = cast(StateDoc, d)  # the layout is trusted once the header matches
     if not isinstance(d, dict) or doc.get("format") != FORMAT or doc.get("version") != VERSION:
         raise ValueError(f"not a {FORMAT} v{VERSION} document")
@@ -191,42 +228,50 @@ def state_from_dict(prog: Program, d: object) -> State:
     classes = {c.uid: c for c in prog.classes}
 
     def func(uid: str) -> FuncId:
+        """Return the function with uid `uid`; raise `ValueError` if `prog` has none."""
         if uid not in funcs:
             raise ValueError(f"unknown function {uid}")
         return funcs[uid]
 
     def cls(uid: str) -> ClassId:
+        """Return the class with uid `uid`; raise `ValueError` if `prog` has none."""
         if uid not in classes:
             raise ValueError(f"unknown class {uid}")
         return classes[uid]
 
     def alloc(a: AllocRow) -> Alloc | None:
+        """Decode an allocation site row."""
         return None if a is None else Alloc(func(a[0]), a[1], a[2])
 
     vals: list[Node | Token] = []
 
     def get[T](i: int, kind: type[T]) -> T:
+        """Return decoded value `i`, raising `ValueError` if it is not a `kind`."""
         v = vals[i]
         if not isinstance(v, kind):
             raise ValueError(f"value {i} is a {type(v).__name__}, expected a {kind.__name__}")
         return v
 
     def opt_node(i: int | None) -> Node | None:
+        """Return decoded node `i`, or None when `i` is None."""
         return None if i is None else get(i, Node)
 
     def tok(i: int) -> Token:
+        """Return decoded token `i`, raising `ValueError` if it is a node."""
         v = vals[i]
         if isinstance(v, Node):
             raise ValueError(f"value {i} is a context node, expected a token")
         return v
 
     def recv(i: int) -> ClassObj | Instance:
+        """Return decoded value `i`, raising `ValueError` unless it is a class or an instance."""
         v = vals[i]
         if not isinstance(v, (ClassObj, Instance)):
             raise ValueError(f"value {i} is a {type(v).__name__}, expected a receiver")
         return v
 
     def toks(ids: Iterable[int]) -> Vals:
+        """Return the set of decoded tokens with indices `ids`."""
         return frozenset(tok(i) for i in ids)
 
     for v in doc["values"]:
@@ -262,6 +307,7 @@ def state_from_dict(prog: Program, d: object) -> State:
                 vals.append(Property(toks(fget), toks(fset), toks(fdel)))
 
     def env(e: EnvDoc) -> Env:
+        """Decode an environment."""
         return {k: toks(ids) for k, ids in e.items()}
 
     state = State(doc["max_ctx"], doc["program"], doc["flow_sensitive"])
@@ -283,11 +329,17 @@ def state_from_dict(prog: Program, d: object) -> State:
 
 
 def save_state(state: State, path: Path) -> None:
+    """Write `state` to the file at `path` as a `StateDoc` JSON document."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(state_to_dict(state), f)
 
 
 def load_state(prog: Program, path: Path) -> State:
+    """Read a state saved by `save_state` from `path`, for the program `prog`.
+
+    The state keeps its own `max_ctx` and flow mode. Raises `ValueError` as
+    `state_from_dict` does, e.g. when the source changed since the state was saved.
+    """
     with open(path, encoding="utf-8") as f:
         return state_from_dict(prog, json.load(f))
 
@@ -299,6 +351,7 @@ Codec = tuple[Encode, Decode]
 
 
 def _encode_callgraph(state: PassState) -> StateDoc:
+    """Encode the call graph pass state; raise `TypeError` if it is not a `State`."""
     if not isinstance(state, State):
         raise TypeError(f"callgraph state must be a State, not a {type(state).__name__}")
     return state_to_dict(state)
@@ -308,6 +361,10 @@ CODECS: dict[str, Codec] = {"callgraph": (_encode_callgraph, state_from_dict)}  
 
 
 def facts_to_dict(facts: Facts, codecs: Mapping[str, Codec] = CODECS) -> FactsDoc:
+    """Encode a `Facts` store as a JSON-ready `FactsDoc`, each pass through its codec.
+
+    codecs  (encode, decode) pair per pass name; raises `ValueError` if a pass has none
+    """
     missing = set(facts.states) - set(codecs)
     if missing:
         raise ValueError(f"no codec for passes {sorted(missing)}")
@@ -316,6 +373,10 @@ def facts_to_dict(facts: Facts, codecs: Mapping[str, Codec] = CODECS) -> FactsDo
 
 
 def facts_from_dict(prog: Program, d: object, codecs: Mapping[str, Codec] = CODECS) -> Facts:
+    """Decode a `facts_to_dict` document for `prog`, each pass through its codec.
+
+    Raises `ValueError` if it is not a "callme-facts" document for this program.
+    """
     doc = cast(FactsDoc, d)  # the layout is trusted once the header matches
     if (not isinstance(d, dict) or doc.get("format") != "callme-facts"
             or doc.get("program") != prog.fingerprint):

@@ -8,7 +8,7 @@
  *   Docs.EnvView              "name ↦ {tokens}" table of one node, keyed so chips animate
  *   Docs.GraphView            call graph with a layered layout; nodes glide between steps
  *   Docs.Tethers              curved connectors between any two elements of a scene
- *   Docs.example(key, k)      the generated analysis of docs/examples/<key>.py (see build.py)
+ *   Docs.example(key, k)      the generated analysis of info/examples/<key>.py (see build.py)
  */
 (function (Docs) {
   "use strict";
@@ -23,7 +23,7 @@
    */
   Docs.example = (key, k = 16) => {
     const ex = window.DOCS_DATA.examples[key];
-    if (!ex) throw new Error(`unknown example ${key}: add it to EXAMPLES in docs/build.py`);
+    if (!ex) throw new Error(`unknown example ${key}: add it to EXAMPLES in info/build.py`);
     const run = ex.runs[String(k)];
     const must = (x, what) => {
       if (!x) throw new Error(`${ex.file}: the analyzer no longer produces ${what}; update this chapter`);

@@ -1,8 +1,8 @@
 /* Chapter 7: objects and hidden calls.
  *
- * Scene "mro"    (docs/examples/objects.py): class attribute tables in MRO order; a lookup walks
+ * Scene "mro"    (info/examples/objects.py): class attribute tables in MRO order; a lookup walks
  *                them left to right. Tables, MRO, instance and edges come from the real run.
- * Scene "hidden" (docs/examples/dunders.py): one step per implicit call site, found in the real
+ * Scene "hidden" (info/examples/dunders.py): one step per implicit call site, found in the real
  *                run's `sites` by line and kind.
  */
 (function () {

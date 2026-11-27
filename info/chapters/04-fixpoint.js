@@ -1,6 +1,6 @@
-/* Chapter 4: the fixpoint.  Example: docs/examples/basics.py with its recorded solver trace.
+/* Chapter 4: the fixpoint.  Example: info/examples/basics.py with its recorded solver trace.
  *
- * run.rounds[i] holds only what round i added (see rounds_json in docs/build.py); this script
+ * run.rounds[i] holds only what round i added (see rounds_json in info/build.py); this script
  * accumulates them so that step i shows the solver's whole state after round i.
  */
 (function () {
@@ -10,7 +10,7 @@
   const ex = example("basics");
   Docs.seedPalette(ex);
   const rounds = ex.run.rounds;
-  if (!rounds) throw new Error("basics needs trace=True in docs/build.py");
+  if (!rounds) throw new Error("basics needs trace=True in info/build.py");
 
   // Hand-written meaning of each round; the badges (+nodes, +edges) are computed from the trace.
   const NOTES = [

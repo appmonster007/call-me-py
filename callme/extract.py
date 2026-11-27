@@ -24,6 +24,17 @@ ScopeNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
 
 @dataclass(frozen=True)
 class Sig:
+    """Signature of a function, as needed to bind call arguments to parameters.
+
+    pos       positional parameters, positional-only ones included, in order
+    kwonly    keyword-only parameters
+    vararg    name of the `*args` parameter, or None
+    kwarg     name of the `**kwargs` parameter, or None
+    defaults  (parameter, default expression) pairs; the expressions are evaluated where the
+              function is defined
+    required  parameters without a default
+    """
+
     pos: tuple[str, ...]
     kwonly: tuple[str, ...]
     vararg: str | None
@@ -34,6 +45,20 @@ class Sig:
 
 @dataclass(eq=False)
 class FuncInfo:
+    """Everything the analysis knows statically about one function.
+
+    kind       "module", "def" or "lambda"
+    node       the AST node: the module, a def or a lambda
+    parent     lexically enclosing function, or None for the module body; classes in between
+               are skipped, as in Python's own scoping
+    locals     names bound in the function's own scope, parameters included and names
+               declared `global` or `nonlocal` excluded
+    body       statements to run; a lambda's body is its single expression
+    owner      class whose body defines the function directly, or None
+    globals    names declared `global`, which are written in the module
+    nonlocals  names declared `nonlocal`, which are written in an enclosing function
+    """
+
     id: FuncId
     kind: str  # "module" | "def" | "lambda"
     node: ast.AST
@@ -48,6 +73,13 @@ class FuncInfo:
 
 @dataclass(eq=False)
 class ClassInfo:
+    """Everything the analysis knows statically about one class definition.
+
+    parent       function (or module body) whose code runs the class statement
+    body         statements of the class body
+    known_attrs  names annotated in the class body or assigned as `self.<name>` in its methods
+    """
+
     id: ClassId
     node: ast.ClassDef
     parent: FuncId  # lexical enclosing function (or module)
@@ -57,6 +89,16 @@ class ClassInfo:
 
 @dataclass(eq=False)
 class Program:
+    """A parsed source file: its functions, classes and CFGs, keyed by id.
+
+    module         id of the module body, the root of the analysis
+    by_node        function id of each def, lambda and module node, keyed by `id(node)`
+    class_by_node  class id of each class node, keyed by `id(node)`
+    cfgs           one CFG per function
+    fingerprint    hash of the file name and source; saved states are only valid for the
+                   program with the same fingerprint
+    """
+
     file: str
     tree: ast.Module
     module: FuncId
@@ -68,13 +110,17 @@ class Program:
     fingerprint: str = ""  # hash of file name + source; identifies this program version
 
     def nesting_edges(self) -> list[tuple[FuncId, FuncId]]:
-        """The function-identifier graph: (lexical parent, child)."""
+        """Return the function-identifier graph as (lexical parent, child) pairs."""
         return [(i.parent, i.id) for i in self.funcs.values() if i.parent is not None]
 
 
 # ---------------------------------------------------------------- scopes
 def outer_parts(n: ScopeNode) -> list[ast.expr]:
-    """Parts of a scope node that are evaluated in the *enclosing* scope."""
+    """Return the parts of a def, lambda or class that run in the enclosing scope.
+
+    These are the decorators, default values, base classes and class keywords: they are
+    evaluated where the definition is, not inside it.
+    """
     if isinstance(n, ast.ClassDef):
         return [*n.decorator_list, *n.bases, *[k.value for k in n.keywords]]
     a = n.args  # FunctionDef / AsyncFunctionDef / Lambda
@@ -83,7 +129,11 @@ def outer_parts(n: ScopeNode) -> list[ast.expr]:
 
 
 def walk_scope(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
-    """All nodes of one scope; nested scopes are yielded but not entered."""
+    """Yield every AST node that belongs to one scope, in source order.
+
+    Nested defs, lambdas and classes are yielded, together with their parts that run in this
+    scope (`outer_parts`), but their bodies are not entered.
+    """
     stack: list[ast.AST] = list(reversed(list(nodes)))
     while stack:
         n = stack.pop()
@@ -95,6 +145,7 @@ def walk_scope(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
 
 
 def make_sig(args: ast.arguments) -> Sig:
+    """Return the `Sig` of a function's argument list."""
     pos = [a.arg for a in args.posonlyargs + args.args]
     defaults: dict[str, ast.expr] = {}
     for name, d in zip(pos[len(pos) - len(args.defaults):], args.defaults):
@@ -113,7 +164,7 @@ def make_sig(args: ast.arguments) -> Sig:
 
 
 def pattern_names(n: ast.AST) -> tuple[str, ...]:
-    """Names captured by one `match` pattern node (MatchAs / MatchStar / MatchMapping)."""
+    """Return the names that one `match` pattern node binds itself (not its sub-patterns)."""
     if isinstance(n, (ast.MatchAs, ast.MatchStar)):
         return (n.name,) if n.name else ()
     if isinstance(n, ast.MatchMapping):
@@ -122,6 +173,11 @@ def pattern_names(n: ast.AST) -> tuple[str, ...]:
 
 
 def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[str]:
+    """Return the names local to one scope: its parameters and every name the scope binds.
+
+    Assignments, deletions, defs, classes, imports, `except ... as` and `match` captures
+    count; names declared `global` or `nonlocal` are removed.
+    """
     names = set(params)
     declared: set[str] = set()
     for n in walk_scope(body):
@@ -142,7 +198,7 @@ def scope_locals(body: Iterable[ast.AST], params: Iterable[str]) -> frozenset[st
 
 
 def scope_decls(body: Iterable[ast.AST]) -> tuple[frozenset[str], frozenset[str]]:
-    """Names declared `global` and `nonlocal` in one scope."""
+    """Return the names declared `global` and those declared `nonlocal` in one scope."""
     glob: set[str] = set()
     nonloc: set[str] = set()
     for n in walk_scope(body):
@@ -154,7 +210,7 @@ def scope_decls(body: Iterable[ast.AST]) -> tuple[frozenset[str], frozenset[str]
 
 
 def class_known_attrs(body: Sequence[ast.stmt]) -> frozenset[str]:
-    """Attribute names statically declared in a class body or assigned to `self.<attr>`."""
+    """Return the names annotated in a class body or assigned as `self.<name>` in its methods."""
     names: set[str] = set()
     for n in walk_scope(body):
         if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
@@ -173,6 +229,14 @@ def class_known_attrs(body: Sequence[ast.stmt]) -> frozenset[str]:
 
 # ---------------------------------------------------------------- program
 def build_program(source: str, filename: str = "<string>") -> Program:
+    """Parse `source` and return its `Program`, with ids, scopes, signatures and CFGs.
+
+    Every def, async def and lambda gets a `FuncInfo`, and every class a `ClassInfo`. A
+    qualname is the dotted path of enclosing defs and classes. A lambda is named
+    `<lambda>@<line>`, and a lambda in a def's default values is put under that def.
+    `filename` is recorded in every id and in the fingerprint. Raises `SyntaxError` for
+    invalid source.
+    """
     tree = ast.parse(source, filename=filename)
     funcs: dict[FuncId, FuncInfo] = {}
     by_node: dict[int, FuncId] = {}
@@ -182,6 +246,7 @@ def build_program(source: str, filename: str = "<string>") -> Program:
     def add(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda, qualname: str, parent: FuncId,
             kind: str, body: Sequence[ast.AST], args: ast.arguments,
             owner: ClassId | None = None) -> FuncId:
+        """Register a def or lambda under `qualname` and return its new id."""
         fid = FuncId(qualname, filename, node.lineno, node.col_offset)
         sig = make_sig(args)
         params = [*sig.pos, *sig.kwonly, *([sig.vararg] if sig.vararg else []),
@@ -198,6 +263,12 @@ def build_program(source: str, filename: str = "<string>") -> Program:
     by_node[id(tree)] = mod
 
     def walk(node: ast.AST, prefix: str, parent: FuncId, owner: ClassId | None = None) -> None:
+        """Register every function and class found under `node`.
+
+        prefix  qualname prefix of the scope being walked, e.g. "Outer.make."
+        parent  function whose code runs `node`
+        owner   class whose body `node` is directly in, if any
+        """
         if isinstance(node, FUNC_NODES):
             fid = add(node, prefix + node.name, parent, "def",
                       node.body, node.args, owner)
@@ -236,17 +307,24 @@ def build_program(source: str, filename: str = "<string>") -> Program:
 
 
 def fingerprint(source: str, filename: str) -> str:
-    """Two parses get the same fingerprint iff file name and source are equal."""
+    """Return a hash that is the same for two parses exactly when file name and source match."""
     return hashlib.sha256(f"{filename}\0{source}".encode()).hexdigest()
 
 
 def parse_file(path: str | os.PathLike[str]) -> Program:
+    """Read the UTF-8 Python file at `path` and return its `Program`, named `str(path)`."""
     p = Path(path)
     return build_program(p.read_text(encoding="utf-8"), str(p))
 
 
 # ---------------------------------------------------------------- call sites
 def make_site(caller: FuncId, node: ast.expr, kind: str = "call") -> Site:
+    """Return the `Site` of a call node, or of a decorator when `kind` is "decorator".
+
+    The text is the call's source, prefixed with "@" for a decorator and cut to 60 characters.
+    The CFG builder and the interpreter both build their sites with this function, so the two
+    always agree.
+    """
     text = ast.unparse(node)
     if kind == "decorator":
         text = "@" + text
@@ -256,6 +334,9 @@ def make_site(caller: FuncId, node: ast.expr, kind: str = "call") -> Site:
 
 
 def call_sites(prog: Program, fid: FuncId) -> tuple[Site, ...]:
-    """Call sites (and decorator applications) executed by `fid`, including those
-    in class bodies; taken from the CFG so both always agree."""
+    """Return the call sites that function `fid` executes, sorted by position.
+
+    Decorator applications and calls in class bodies the function runs are included. They
+    are read from the function's CFG, so both always agree.
+    """
     return tuple(sorted(prog.cfgs[fid].calls, key=lambda s: (s.line, s.col, s.kind)))

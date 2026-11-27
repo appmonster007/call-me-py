@@ -40,32 +40,55 @@ Frontier = list[tuple[int, str]]  # dangling (source point, edge kind) pairs
 
 
 def short(node: ast.AST, limit: int = 50) -> str:
+    """Return the first line of `node`'s source, cut to `limit` characters with "..." if longer."""
     text = ast.unparse(node).split("\n", 1)[0]
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 @final
 class _Loop:
+    """Frame of a loop being built: its head point and the `break` exits waiting for its end."""
+
     def __init__(self, head: int) -> None:
+        """Start a frame for the loop whose head is point `head`, with no breaks yet."""
         self.head = head
         self.breaks: Frontier = []
 
 
 @final
 class _Try:  # collects exception sources of a try body
+    """Frame of a `try` body being built: the exception sources that go to its handlers."""
+
     def __init__(self) -> None:
+        """Start a frame with no exception sources yet."""
         self.exc: Frontier = []
 
 
 @final
 class _Finally:  # abrupt exits waiting to run a finally block
+    """Frame of a `try ... finally`: abrupt exits that must run the finally block first."""
+
     def __init__(self) -> None:
+        """Start a frame with no pending exits; each one is recorded as (frontier, jump kind)."""
         self.pending: list[tuple[Frontier, str]] = []
 
 
 @final
 class Builder:
+    """Builder of one function's CFG, fed statements and expressions in evaluation order.
+
+    The frontier is the list of dangling (point, edge kind) pairs that the next emitted point is
+    linked from; it is empty after a jump, which makes the code that follows unreachable.
+    `frames` is the stack of enclosing loops, `try` bodies and finally blocks that decide where
+    a jump goes.
+    """
+
     def __init__(self, fid: FuncId, make_site: Callable[..., Site]) -> None:
+        """Create the entry and exit points and set the frontier to the entry.
+
+        fid        function whose body is being built
+        make_site  `extract.make_site`, used to give each call point its `Site`
+        """
         self.fid, self.make_site = fid, make_site
         self.nodes: list[CFGNode] = []
         self.edges: dict[CFGEdge, None] = {}  # ordered set
@@ -78,17 +101,23 @@ class Builder:
 
     # ------------------------------------------------------------ plumbing
     def new(self, kind: str, node: ast.AST | None, text: str, site: Site | None = None) -> int:
+        """Add a point without linking it, and return its index."""
         idx = len(self.nodes)
         self.nodes.append(CFGNode(idx, kind, getattr(node, "lineno", 0),
                                   getattr(node, "col_offset", 0), text, site))
         return idx
 
     def link(self, src: Frontier, dst: int) -> None:
+        """Add an edge from every (point, kind) pair in `src` to point `dst`."""
         for s, k in src:
             self.edges[CFGEdge(s, dst, k)] = None
 
     def emit(self, kind: str, node: ast.AST | None, text: str, site: Site | None = None) -> int:
-        """New point reached from the frontier; it becomes the new frontier."""
+        """Add a point linked from the frontier, make it the new frontier, and return its index.
+
+        Inside a `try` body the point also gets an exception edge to the handlers, because any
+        point there may raise; inside a finally block it is recorded as a pending raise instead.
+        """
         idx = self.new(kind, node, text, site)
         self.link(self.frontier, idx)
         self.frontier = [(idx, FLOW)]
@@ -102,7 +131,13 @@ class Builder:
         return idx
 
     def jump(self, kind: str) -> None:
-        """Leave the frontier abruptly: return | raise | break | continue."""
+        """Leave the frontier abruptly with `kind` "return", "raise", "break" or "continue".
+
+        The nearest frame that handles the jump receives it: a finally block delays it until the
+        block has run, a `try` body sends a raise to its handlers, and a loop takes `break` to its
+        end and `continue` to its head. With no such frame the jump goes to the exit, as an
+        exception edge for a raise. The frontier is empty afterwards.
+        """
         src, self.frontier = self.frontier, []
         if not src:
             return
@@ -122,10 +157,17 @@ class Builder:
         self.link([(s, EXC if kind == "raise" else k) for s, k in src], self.exit)
 
     def branch(self, node: ast.AST, text: str) -> int:
+        """Emit a BRANCH point for a test and return it; callers link its TRUE and FALSE sides."""
         return self.emit(BRANCH, node, text)
 
     # ------------------------------------------------------------ expressions
     def expr(self, e: ast.AST | None) -> None:
+        """Emit the points for the calls inside expression `e`, in Python's evaluation order.
+
+        `a if c else b`, `and` / `or` and comprehensions add BRANCH or LOOP points, because the
+        calls in them may not run. A lambda's body is not entered (it has its own CFG); only its
+        default values are. Expressions without calls emit nothing. `None` is ignored.
+        """
         if e is None:
             return
         if isinstance(e, ast.Call):
@@ -171,13 +213,18 @@ class Builder:
                     self.expr(c)
 
     def call_point(self, node: ast.AST, site: Site) -> None:
+        """Emit the CALL and AFTER_CALL points of `site`, joined by a call-to-return edge.
+
+        The ICFG later adds call edges out of the CALL point and return edges into the AFTER_CALL
+        point. `site` must be the `Site` that `extract.make_site` gives the same node.
+        """
         c = self.emit(CALL, node, site.text, site)
         self.frontier = [(c, CALL_TO_RETURN)]
         r = self.emit(AFTER_CALL, node, site.text, site)
         self.calls[site] = (c, r)
 
     def comprehension(self, e: Comprehension) -> None:
-        """One loop head for all generators (nested loops are merged)."""
+        """Emit a comprehension as one loop whose head serves all its generators."""
         gens = e.generators
         self.expr(gens[0].iter)
         head = self.emit(LOOP, e, f"for {short(gens[0].target)} in {short(gens[0].iter)}")
@@ -202,10 +249,16 @@ class Builder:
 
     # ------------------------------------------------------------ statements
     def block(self, stmts: Iterable[ast.AST]) -> None:
+        """Emit the statements in order."""
         for s in stmts:
             self.stmt(s)
 
     def stmt(self, s: ast.AST) -> None:
+        """Emit one statement, dispatching to `s_<StatementType>` when there is such a method.
+
+        Any other statement is simple: its expressions are emitted, then one STMT point for its
+        own effect.
+        """
         m = getattr(self, "s_" + type(s).__name__, None)
         if m is not None:
             m(s)
@@ -218,31 +271,37 @@ class Builder:
             self.emit(STMT, s, short(s))
 
     def s_Assign(self, s: ast.Assign) -> None:
+        """Emit `targets = value`: the value first, then the targets, then the statement."""
         self.expr(s.value)
         for t in s.targets:
             self.expr(t)
         self.emit(STMT, s, short(s))
 
     def s_Return(self, s: ast.Return) -> None:
+        """Emit `return`, then jump out of the function."""
         self.expr(s.value)
         self.emit(STMT, s, short(s))
         self.jump("return")
 
     def s_Raise(self, s: ast.Raise) -> None:
+        """Emit `raise`, then jump to the nearest handler or the exit."""
         self.expr(s.exc)
         self.expr(s.cause)
         self.emit(STMT, s, short(s))
         self.jump("raise")
 
     def s_Break(self, s: ast.Break) -> None:
+        """Emit `break`, then jump to the end of the loop."""
         self.emit(STMT, s, "break")
         self.jump("break")
 
     def s_Continue(self, s: ast.Continue) -> None:
+        """Emit `continue`, then jump back to the loop head."""
         self.emit(STMT, s, "continue")
         self.jump("continue")
 
     def s_Assert(self, s: ast.Assert) -> None:
+        """Emit `assert`: a branch whose false side evaluates the message and raises."""
         self.expr(s.test)
         b = self.branch(s, short(s.test))
         self.frontier = [(b, FALSE)]
@@ -251,6 +310,7 @@ class Builder:
         self.frontier = [(b, TRUE)]
 
     def s_If(self, s: ast.If) -> None:
+        """Emit `if`: a branch whose two sides run the body and the `else` block, then meet."""
         self.expr(s.test)
         b = self.branch(s, short(s.test))
         self.frontier = [(b, TRUE)]
@@ -261,12 +321,14 @@ class Builder:
         self.frontier = then + self.frontier
 
     def s_While(self, s: ast.While) -> None:
+        """Emit `while`: a loop head, then the test as a branch into the body or out of the loop."""
         head = self.emit(LOOP, s, "while")
         self.expr(s.test)
         b = self.branch(s.test, short(s.test))
         self.loop_body(head, [(b, TRUE)], [(b, FALSE)], s)
 
     def s_For(self, s: ast.For | ast.AsyncFor) -> None:
+        """Emit `for` or `async for`: the iterable, then a loop head leading to the body or out."""
         self.expr(s.iter)
         head = self.emit(LOOP, s, f"for {short(s.target)} in {short(s.iter)}")
         self.frontier = [(head, TRUE)]
@@ -277,6 +339,11 @@ class Builder:
 
     def loop_body(self, head: int, enter: Frontier, leave: Frontier,
                   s: ast.While | ast.For | ast.AsyncFor) -> None:
+        """Emit a loop body from `enter` and link its end back to `head`, then the `else` block.
+
+        The `else` block starts from `leave`, the normal exit of the loop; `break` exits skip it
+        and join the frontier after it.
+        """
         loop = _Loop(head)
         self.frames.append(loop)
         self.frontier = enter
@@ -288,6 +355,7 @@ class Builder:
         self.frontier += loop.breaks
 
     def s_With(self, s: ast.With | ast.AsyncWith) -> None:
+        """Emit `with` or `async with`: the context expressions and targets, then the body."""
         for it in s.items:
             self.expr(it.context_expr)
             self.expr(it.optional_vars)
@@ -297,6 +365,14 @@ class Builder:
     s_AsyncWith = s_With
 
     def s_Try(self, s: ast.Try | ast.TryStar) -> None:
+        """Emit `try` or `try*` with its handlers, `else` block and finally block.
+
+        Every point of the body may raise to each handler. Handler types are unknown, so an
+        exception can also pass all handlers and is raised on. With a finally block, every exit
+        from the body and the handlers (normal, return, raise, break or continue) runs the finally
+        block first; afterwards each kind of abrupt exit continues to its own target, and the
+        normal path continues only if one of the paths reached the end normally.
+        """
         fin = _Finally() if s.finalbody else None
         if fin:
             self.frames.append(fin)
@@ -329,6 +405,7 @@ class Builder:
         self.frontier = end if normal else []
 
     def s_FunctionDef(self, s: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        """Emit a def: its decorators and default values run here, its body gets its own CFG."""
         for d in s.decorator_list:
             self.expr(d)
         a = s.args
@@ -340,6 +417,7 @@ class Builder:
     s_AsyncFunctionDef = s_FunctionDef
 
     def s_ClassDef(self, s: ast.ClassDef) -> None:
+        """Emit a class: decorators, bases, keywords, the body inline, then the decorator calls."""
         for x in [*s.decorator_list, *s.bases, *[k.value for k in s.keywords]]:
             self.expr(x)
         self.block(s.body)  # the class body runs here
@@ -347,10 +425,15 @@ class Builder:
         self.emit(STMT, s, f"class {s.name}")
 
     def decorate(self, s: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> None:
+        """Emit one decorator call point per decorator, applied from the bottom one up."""
         for d in reversed(s.decorator_list):  # applied bottom-up
             self.call_point(d, self.make_site(self.fid, d, "decorator"))
 
     def s_Match(self, s: ast.Match) -> None:
+        """Emit `match`: each case is a branch, plus one for its guard if it has one.
+
+        A case that does not match falls through to the next case.
+        """
         self.expr(s.subject)
         out: Frontier = []
         for case in s.cases:
@@ -370,6 +453,7 @@ class Builder:
 
     # ------------------------------------------------------------ result
     def finish(self) -> CFG:
+        """Link the frontier to the exit and return the finished CFG."""
         self.link(self.frontier, self.exit)
         return CFG(self.fid, tuple(self.nodes), tuple(self.edges), dict(self.calls),
                    self.entry, self.exit)
@@ -377,7 +461,14 @@ class Builder:
 
 def build_cfg(fid: FuncId, node: ast.AST, body: Sequence[ast.AST],
               make_site: Callable[..., Site]) -> CFG:
-    """CFG of one function (FuncInfo's id, node and body): module, def or lambda."""
+    """Build the CFG of one function from its `FuncInfo` parts.
+
+    fid        id of the function
+    node       its AST node: the module, a def or a lambda
+    body       the statements to run; a lambda's body expression is used instead, followed by
+               an implicit `return`
+    make_site  `extract.make_site`, so that call points get the same `Site` as the analysis
+    """
     b = Builder(fid, make_site)
     if isinstance(node, ast.Lambda):
         b.expr(node.body)

@@ -1,4 +1,4 @@
-/* Chapter 5: closures.  Example: docs/examples/closures.py
+/* Chapter 5: closures.  Example: info/examples/closures.py
  *
  * Node environments come from the real run; a closure chip's tether is drawn to the card of the
  * node in its `parent` field. The last step is a labelled what-if (closures without tethers).

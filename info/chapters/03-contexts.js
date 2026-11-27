@@ -1,4 +1,4 @@
-/* Chapter 3: contexts.  Example: docs/examples/contexts.py, analysed with max_contexts 0, 16, 1.
+/* Chapter 3: contexts.  Example: info/examples/contexts.py, analysed with max_contexts 0, 16, 1.
  *
  * Each step shows one real run: its nodes (with parameter values and return values) and its
  * context-level call graph. Edges that the default run (16) does not have are drawn red.

@@ -1,4 +1,4 @@
-/* Chapter 6: the heap.  Example: docs/examples/heap.py
+/* Chapter 6: the heap.  Example: info/examples/heap.py
  *
  * Names on the left (the module env), the Box and its heap contents on the right, tethers from
  * every Box chip to the box. All values, heap contents and call targets come from the real run.
