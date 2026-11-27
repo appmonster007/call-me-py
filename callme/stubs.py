@@ -38,7 +38,7 @@ from .model import (
     Vals,
 )
 
-STUB_MODULES = frozenset({"dataclasses", "functools", "itertools"})
+STUB_MODULES = frozenset({"dataclasses", "functools", "importlib", "itertools"})
 METHOD_STUBS = {  # attribute name -> stub (receiver is bound first)
     "sort": "list.sort", "get": "dict.get",
     **{m: "<elements>" for m in ("values", "items", "keys", "copy", "pop", "popitem")},
@@ -160,6 +160,10 @@ class Host(Protocol):
 
     def iterate(self, iterable: Vals, site: Site, *, is_async: bool = False) -> Vals:
         """Return the values that iterating `iterable` yields, calling `__iter__` and `__next__`."""
+        ...
+
+    def import_any(self) -> Vals:
+        """Return every module of the program, and run each, as an import of an unknown name may."""
         ...
 
 
@@ -563,6 +567,16 @@ def _elements(_it: Host, a: Args, _site: Site) -> Vals:
     and `d.popitem()`; the receiver is the first argument.
     """
     return a.get(0) | union(a.pos[2:])  # receiver's elements (already deref'd) | default
+
+
+@stub("__import__", "importlib.import_module")
+def _import(it: Host, _a: Args, _site: Site) -> Vals:
+    """Model `__import__(name)` and `importlib.import_module(name)`: return any program module.
+
+    Strings are not tracked, so the name is unknown: every module of the program may come
+    back, and each one runs (`Host.import_any`). Modules outside the program are not found.
+    """
+    return it.import_any()
 
 
 # ---------------------------------------------------------------- functools / itertools

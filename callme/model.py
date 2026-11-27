@@ -8,6 +8,7 @@ Vocabulary:
   ClassObj     a *token* representing a class object
   Instance     a *token* representing an abstract instance of a class (per allocation site)
   Box          a *token* for a mutable container (list / dict / set), per allocation site
+  Module       a *token* for a module object of the program, by dotted name
   Alloc        an allocation site: where an instance or container is created
   BoundMethod  a *token*: a callable with a receiver pre-bound as first argument
   ClassMethod  a *token*: `classmethod(func)` descriptor binding the owner class
@@ -33,6 +34,19 @@ from pathlib import PurePath
 from typing import override
 
 
+def module_name(file: str) -> str:
+    """Return the dotted module name for a file path taken as is, e.g. "pkg.util" for "pkg/util.py".
+
+    A trailing `__init__` is dropped. If no name is left, the file path is returned as is.
+    Programs loaded from disk name their modules relative to the import root instead.
+    """
+    parts = PurePath(file).with_suffix("").parts
+    parts = tuple(p for p in parts if p not in ("/", ".", ".."))
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts) or file
+
+
 @dataclass(frozen=True)
 class _SymId:
     """Identity layout shared by functions and classes; the string forms are built on demand.
@@ -41,12 +55,20 @@ class _SymId:
     qualname  dotted scope path of the definition, e.g. "Outer.make.inner"
     lineno    1-based line of the definition
     col       0-based column of the definition
+    module    dotted name of the defining module, e.g. "pkg.util"; when left empty it is
+              derived from `file` (see `module_name`). It is not part of the identity.
     """
 
     qualname: str
     file: str
     lineno: int
     col: int
+    module: str = field(default="", compare=False)
+
+    def __post_init__(self) -> None:
+        """Derive `module` from `file` when it was not given."""
+        if not self.module:
+            object.__setattr__(self, "module", module_name(self.file))
 
     @property
     def name(self) -> str:
@@ -57,18 +79,6 @@ class _SymId:
     def scope(self) -> str:
         """Return the qualname without its last part, e.g. "Outer.make", or "" at top level."""
         return self.qualname.rpartition(".")[0]
-
-    @property
-    def module(self) -> str:
-        """Return the dotted module name derived from the file path, e.g. "pkg.util".
-
-        A trailing `__init__` is dropped. If no name is left, the file path is returned as is.
-        """
-        parts = PurePath(self.file).with_suffix("").parts
-        parts = tuple(p for p in parts if p not in ("/", ".", ".."))
-        if parts and parts[-1] == "__init__":
-            parts = parts[:-1]
-        return ".".join(parts) or self.file
 
     @property
     def uid(self) -> str:
@@ -326,16 +336,36 @@ class Box:
         return self._h
 
 
+@dataclass(frozen=True)
+class Module:
+    """Token for the module object of the program's module `name`, e.g. "pkg.util".
+
+    Its attributes are the module's globals and its submodules (`Interp.module_attr`). Modules
+    outside the program are not `Module`s: stub modules are `Builtin`s, and others are unknown.
+    """
+
+    name: str
+    depth: int = field(default=0, compare=False)
+    _h: int = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_h", hash(("module", self.name)))
+
+    @override
+    def __hash__(self) -> int:
+        return self._h
+
+
 Token = (Closure | Builtin | ClassObj | Instance | BoundMethod
-         | ClassMethod | StaticMethod | Super | Property | Box)
+         | ClassMethod | StaticMethod | Super | Property | Box | Module)
 
 
 def token_label(tok: Token, style: str = "full") -> str:
     """Return the printable name of a token, with ids rendered in `style`.
 
     Closures print as their function id, classes as `<class C>`, instances as `C()@line:col`,
-    boxes as `<list@line:col>` and partials as `<partial:f>`; the other tokens print as calls,
-    e.g. `classmethod(f)` or `super(C, C()@3:0)`.
+    boxes as `<list@line:col>`, modules as `<module pkg.util>` and partials as `<partial:f>`;
+    the other tokens print as calls, e.g. `classmethod(f)` or `super(C, C()@3:0)`.
     """
     if isinstance(tok, Builtin):
         if tok.bound and tok.name.startswith("<partial"):
@@ -349,6 +379,8 @@ def token_label(tok: Token, style: str = "full") -> str:
         return f"{tok.cls.render(style)}(){at}"
     if isinstance(tok, Box):
         return f"<{tok.kind}@{tok.alloc.line}:{tok.alloc.col}>"
+    if isinstance(tok, Module):
+        return f"<module {tok.name}>"
     if isinstance(tok, BoundMethod):
         return f"{token_label(tok.func, style)}@{token_label(tok.receiver, style)}"
     if isinstance(tok, ClassMethod):

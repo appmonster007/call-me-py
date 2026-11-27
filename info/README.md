@@ -22,10 +22,10 @@ source of every code reference and the `callme` package for the playground.
 
 ```sh
 python info/build.py           # after changing callme/ or info/
-python info/build.py --check   # what tests/test_docs.py runs
+python info/build.py --check   # what tests/test_info.py runs
 ```
 
-`tests/test_docs.py` fails when `data.js` is stale, or when a page references a function that no
+`tests/test_info.py` fails when `data.js` is stale, or when a page references a function that no
 longer exists. After rebuilding, open the affected chapters with `?selftest`. A scene whose story
 the analyzer no longer produces throws an error instead of drawing something false (see
 `Docs.example(...).edge/node`). Then update that chapter's captions.

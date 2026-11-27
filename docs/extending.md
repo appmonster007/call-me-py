@@ -19,7 +19,8 @@ def _starmap(it: Host, a: Args, site: Site) -> Vals:
   - A name without a dot is a builtin. It is found by name unless the user shadows it, and is
     added to `BUILTIN_NAMES` automatically.
   - `module.name` is reached via `import module` or `from module import name`. A new module
-    must also be added to `STUB_MODULES`.
+    must also be added to `STUB_MODULES`. A project file with the same module name wins over
+    the stub module, as it would in Python.
   - `<name>` is an internal token that user code cannot name.
   - One function may register several names.
 - **Arguments.** `a: Args` holds the abstract arguments, with bound arguments prepended and
@@ -109,7 +110,8 @@ work over `(Node, point)` pairs. To make the pass's state saveable, register an
 ## Add a test case
 
 Add `examples/cases/<family>/NN_name.py`, or a directory with a `main.py` for a multi-file
-case. Its docstring lists the ground truth under the headers `EXPECTED`, `STATIC_ONLY`,
+case; its other modules are loaded by following `main.py`'s imports, and names carry the
+module (`pkg.core.run`). Its docstring lists the ground truth under the headers `EXPECTED`, `STATIC_ONLY`,
 `SPAWN`, `SITES` and so on; [examples/cases/README.md](../examples/cases/README.md) describes
 the format. Case numbers are unique across families. `tests/test_examples.py` picks the case
 up automatically, provided its family is selected in `pytest.ini` or with `--families`.
@@ -117,5 +119,5 @@ up automatically, provided its family is selected in `pytest.ini` or with `--fam
 ## Keep the explainer in sync
 
 `info/` shows real analyzer output. After changing `callme/`, run `python info/build.py`;
-`tests/test_docs.py` fails until you do. If a chapter's scene changed, open that chapter with
+`tests/test_info.py` fails until you do. If a chapter's scene changed, open that chapter with
 `?selftest` and update its captions, as described in [info/README.md](../info/README.md).

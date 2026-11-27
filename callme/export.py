@@ -23,9 +23,9 @@ def _ctx(cg: CallGraph, node: Node) -> dict[str, list[str]]:
 def to_dict(cg: CallGraph, icfg: bool = False) -> dict[str, object]:
     """Return the call graph as a JSON-ready dict, laid out as documented in docs/output.md.
 
-    The keys are `file`, `functions` (every function, reachable or not), `sites` (each with
-    its possible targets), `edges` (function level, without duplicates), `contexts` and
-    `context_edges`.
+    The keys are `file` (the first entry), `modules` (every loaded module and its file),
+    `functions` (every function, reachable or not), `sites` (each with its possible
+    targets), `edges` (function level, without duplicates), `contexts` and `context_edges`.
 
     icfg  also add the `icfg` key from `icfg_dict`
     """
@@ -33,8 +33,10 @@ def to_dict(cg: CallGraph, icfg: bool = False) -> dict[str, object]:
     reach = cg.reachable()
     out: dict[str, object] = {
         "file": prog.file,
+        "modules": [{"name": name, "file": m.file} for name, m in prog.modules.items()],
         "functions": [
-            {"id": cg.name(i.id), "kind": i.kind, "file": i.id.file, "line": i.id.lineno,
+            {"id": cg.name(i.id), "kind": i.kind, "module": i.id.module, "file": i.id.file,
+             "line": i.id.lineno,
              "parent": cg.name(i.parent) if i.parent else None,
              "name": i.id.qualname, "col": i.id.col,
              "reachable": i.id in reach}

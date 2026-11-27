@@ -28,9 +28,10 @@ def init_state(prog: Program, state: State | None = None, *,
                flow_sensitive: bool | None = None) -> State:
     """Return a state for `prog` with its root nodes registered, creating it if `state` is None.
 
-    The module body is always a root. With `include_unreachable`, every other function is a
-    root too, analysed with no known arguments, so code that is never called is also covered.
-    Calling it again on its own result changes nothing.
+    The entry module bodies (`Program.entries`) are always roots; other modules become
+    reachable when they are imported. With `include_unreachable`, every module body and every
+    function is a root too, analysed with no known arguments, so code that is never called or
+    imported is also covered. Calling it again on its own result changes nothing.
 
     max_contexts    context budget of a new state (default 16)
     flow_sensitive  flow mode of a new state (default True)
@@ -49,12 +50,16 @@ def init_state(prog: Program, state: State | None = None, *,
         if flow_sensitive is not None and flow_sensitive != state.flow:
             raise ValueError(f"flow_sensitive={flow_sensitive} conflicts with state.flow={state.flow}")
         state.program = prog.fingerprint
-    mod = Node(prog.module, Ctx())
-    state.register(mod)
+    for entry in prog.entries or (prog.module,):
+        state.register(Node(entry, Ctx()))
     if include_unreachable:  # also analyse never-called functions (static-only edges)
         for fid, info in prog.funcs.items():
-            if fid != prog.module:
-                state.register(Node(fid, Ctx((), mod if info.parent == prog.module else None)))
+            if info.kind == "module":
+                state.register(Node(fid, Ctx()))
+                continue
+            in_module = info.parent is not None and prog.funcs[info.parent].kind == "module"
+            parent = Node(info.parent, Ctx()) if in_module and info.parent else None
+            state.register(Node(fid, Ctx((), parent)))
     return state
 
 

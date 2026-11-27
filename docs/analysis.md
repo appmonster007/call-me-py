@@ -19,7 +19,8 @@ to the empty set and are not tracked, so conditions are never decided and both b
 
 A call adds an edge to every function in the callee's value whose signature accepts the
 arguments. `Interp.bind_args` drops callees with the wrong arity. A call whose callee value is
-empty, such as `print(...)` or anything imported from an unknown module, adds no edge.
+empty, such as `print(...)` or anything imported from a module outside the program, adds
+no edge.
 
 ## 2. Contexts: one analysis per entry state
 
@@ -52,10 +53,11 @@ make(double)(2)
 
 `solver.solve` calls `pipeline.run_passes`, which repeats `solver.step` in rounds:
 
-1. **Roots** (`solver.init_state`). The root is the module body, `Node(<module>, Ctx())`. With
-   `include_unreachable`, every other function is also a root, with an empty context (its
-   parent is the module node for top-level functions). This way functions that are never
-   called still get their edges.
+1. **Roots** (`solver.init_state`). The roots are the module bodies of the entry files,
+   `Node(<module>, Ctx())`; other modules join when they are imported (§11). With
+   `include_unreachable`, every module body and every other function is also a root, with an
+   empty context (its parent is its module's node for top-level functions). This way
+   functions that are never called still get their edges.
 2. **A round** runs `transfer.analyze` on every node in `State.order`. It joins each node's
    environment summary, return value and edges into the `State`.
 3. **Calls during a round.** A call with a new entry state registers a new node
@@ -89,10 +91,11 @@ imports, catches or binds in a pattern, minus names declared `global` or `nonloc
 4. a builtin that has a stub (`stubs.BUILTIN_NAMES`) and that nothing shadows;
 5. otherwise the empty set.
 
-`global x` writes go to `State.extern[module]` and `nonlocal x` writes to
-`State.extern[owner]`. The owner adds `extern` to every read of `x`, because any call may have
-written it. Only `functools`, `itertools` and `dataclasses` (`stubs.STUB_MODULES`) bind
-anything when imported. Other imports bind names with empty values.
+`global x` writes go to `State.extern[module]`, the body of the writer's own module, and
+`nonlocal x` writes to `State.extern[owner]`. The owner adds `extern` to every read of `x`,
+because any call may have written it. An import binds a module object or one of its
+attributes (§11); a module outside the program binds a stub when it is one of
+`stubs.STUB_MODULES`, and nothing otherwise.
 
 ## 6. Flow sensitivity
 
@@ -233,15 +236,77 @@ a traced run, where C frames are invisible.
 | containers, pass-through | `list`, `set`, `dict` (each makes a new `Box`), `tuple`, `frozenset`, `enumerate`, `zip`, `itertools.chain` / `cycle` / `islice`, `dict.get`, and the `.values` / `.items` / `.keys` / `.copy` / `.pop` / `.popitem` methods |
 | dunder triggers | `len`, `str`, `repr`, `bool`, `hash`, `iter`, `next`, `reversed` |
 | classes | `classmethod`, `staticmethod`, `property`, `super`, `object`, `type`, `dataclasses.dataclass` |
+| imports | `__import__`, `importlib.import_module` (any module of the program, §11) |
 | internal (`<...>` and dotted) | `<partial>`, `<partial*>`, `<identity>`, `<dataclass>`, `<dataclass_init>`, `<property_getter>` / `_setter` / `_deleter`, `type.__call__`, `object.__new__`, `object.__setattr__` |
 
 A builtin name resolves to its stub only when no user binding shadows it. A method stub
 (`stubs.METHOD_STUBS`) applies when nothing else on the receiver matched the attribute.
 
-## 11. What is not modelled
+## 11. Modules and imports
 
-- **Other files.** Project imports are not followed, so the graph covers only the code in the
-  analysed file.
+```python
+# main.py                          # pkg/__init__.py            # pkg/core.py
+import pkg                         from .core import run        def run(f): return f()
+from pkg import run as go
+def task(): pass
+go(task)                           # main.<module> -> pkg.core.run, pkg.core.run -> main.task
+pkg.core.run(task)                 # the same edges, through the submodule attribute
+```
+
+**Loading** (`extract.parse_files`). The entry files are parsed first, then every module they
+import, transitively. Every import statement counts, wherever it is: inside a function, a
+`try` or an `if TYPE_CHECKING:`. So do `__import__("m")` and `importlib.import_module("m")`
+with a string literal. All modules become one `Program`: their functions share one table, and
+`Program.modules` maps each dotted name to a `ModuleInfo`.
+
+**Names and resolution.** An entry is named by `extract.entry_module`: its stem, prefixed by
+every enclosing directory that has an `__init__.py`. The first directory that is not a package
+is its root. Imports are looked up the way Python's path finder does, in the entry roots and
+then in `search_path`:
+
+- in each directory, `name/__init__.py` wins over `name.py`;
+- a directory without `__init__.py` is a namespace package, but only when no directory has a
+  regular module;
+- submodules are searched in their package's directories;
+- relative imports count from the importing module's package (`extract.absolute_module`);
+- a module built into the interpreter (`sys.builtin_module_names`) is never a project file,
+  and a top-level namespace directory never shadows a standard library module.
+
+An import that names no file stays external. Every id records its module (`FuncId.module`),
+so the "module" id style prints `pkg.core.run`.
+
+**Import semantics** (the `modules` section of `transfer.Interp`):
+
+- `import a.b.c` runs `a`, `a.b` and `a.b.c` (`Interp.run_module`) and binds `a` to the token
+  `Module("a")`; `import a.b.c as x` binds `x` to `Module("a.b.c")`.
+- *Running* a module registers its body node `Node(<module>, Ctx())`, so it is analysed. No
+  call edge is recorded, because a traced run shows no call into a module body either.
+- `from m import n` runs `m` and binds `n` to `Interp.module_attr(m, n)`. That is `n`'s summary
+  in `m`'s body, plus what other modules wrote into it (`State.extern`), plus the submodule
+  `m.n` if it exists, as Python sets it on its package once it is imported.
+- `mod.x` reads the same attribute, and `mod.x = f` joins `f` into `State.extern[mod]`, so
+  patching another module is seen by that module's own code.
+- `from m import *` binds the names in `ModuleInfo.exports`: the literal `__all__`, or else
+  every public module-level name. Those names are added to the importer's locals when the
+  program is built (`_Builder.link_star_imports`), and star imports of star imports are
+  followed.
+
+Module bodies are read as summaries, so the import order does not matter, and circular
+imports need nothing special. The fixpoint fills in a module's globals before the rounds end.
+
+**Dynamic imports.** Strings are not tracked, so the stub for `__import__(name)` and
+`importlib.import_module(name)` returns every module of the program and runs each one
+(`Interp.import_any`). That is sound but coarse: `mod.work()` then reaches every loaded
+module's `work`.
+
+## 12. What is not modelled
+
+- **Code outside the program.** The standard library and third-party packages are not read;
+  only their stubs are known (§10). Changes to `sys.path` at run time are not seen.
+- **Module names built from data.** A module that is never named by an import statement or a
+  string literal at an import call is not loaded. `importlib.import_module(name)` returns only
+  the modules that were loaded, so the plugins named in a list in `dynamic/46_dynamic_import`
+  are missed.
 - **Builtins without a stub**, such as `getattr`, `setattr`, `eval`, `exec`, three-argument
   `type()`, `threading`, `asyncio` and `concurrent.futures`. Calls through them get no edges.
 - **Implicit exceptions.** Only explicit `raise` and `assert` and points inside a `try` body

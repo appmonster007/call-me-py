@@ -76,16 +76,14 @@ def _expectations(case: Path) -> dict[str, set[Edge]]:
     return blocks
 
 
-def _callgraph(case: Path, monkeypatch: pytest.MonkeyPatch, *,
-               flow_sensitive: bool = True) -> CallGraph:
-    if case.is_dir():  # module-qualified names (main.main, pkg.core.run) need paths relative to the case
-        monkeypatch.chdir(case)
-        return analyze_file("main.py", id_style="module", flow_sensitive=flow_sensitive)
+def _callgraph(case: Path, *, flow_sensitive: bool = True) -> CallGraph:
+    if case.is_dir():  # module-qualified names (main.main, pkg.core.run), relative to the case
+        return analyze_file(case / "main.py", id_style="module", flow_sensitive=flow_sensitive)
     return analyze_file(case, id_style="short", flow_sensitive=flow_sensitive)
 
 
-def _analyze(case: Path, monkeypatch: pytest.MonkeyPatch, *, flow_sensitive: bool = True) -> set[Edge]:
-    return set(_callgraph(case, monkeypatch, flow_sensitive=flow_sensitive).function_edges())
+def _analyze(case: Path, *, flow_sensitive: bool = True) -> set[Edge]:
+    return set(_callgraph(case, flow_sensitive=flow_sensitive).function_edges())
 
 
 def _fmt(title: str, edges: set[Edge]) -> str:
@@ -99,9 +97,9 @@ CASE_PARAMS = [pytest.param(c, id=f"{family}/{c.stem if c.is_file() else c.name}
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_sound(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sound(case: Path) -> None:
     expected = _expectations(case)["EXPECTED"]
-    got = _analyze(case, monkeypatch)
+    got = _analyze(case)
     missing = expected - got
     assert not missing, "\n".join([
         f"{case.name}: {len(missing)} of {len(expected)} expected edges missing",
@@ -109,10 +107,10 @@ def test_sound(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_precise(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_precise(case: Path) -> None:
     blocks = _expectations(case)
     allowed = blocks["EXPECTED"].union(*(blocks.get(k, set()) for k in ALLOWED_EXTRA))
-    got = _analyze(case, monkeypatch)
+    got = _analyze(case)
     extra = got - allowed
     assert not extra, "\n".join([
         f"{case.name}: {len(extra)} edges outside EXPECTED | {' | '.join(ALLOWED_EXTRA)}",
@@ -128,13 +126,13 @@ SITE_PARAMS = [p for p in CASE_PARAMS if _has_sites(p.values[0])]  # type: ignor
 
 
 @pytest.mark.parametrize("case", SITE_PARAMS)
-def test_sites(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_sites(case: Path) -> None:
     """Per call line: the analysis reports exactly the traced callees (`caller:line -> callee`)."""
     want: dict[tuple[str, int], set[str]] = {}
     for at, callee in _expectations(case)["SITES"]:
         caller, line = at.rsplit(":", 1)
         want.setdefault((caller, int(line)), set()).add(callee)
-    cg = _callgraph(case, monkeypatch)
+    cg = _callgraph(case)
     wrong: list[str] = []
     for (caller, line), callees in sorted(want.items()):
         got = set().union(*(cg.targets(s) for s in cg.sites
@@ -145,10 +143,10 @@ def test_sites(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("case", CASE_PARAMS)
-def test_flow_refines(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_flow_refines(case: Path) -> None:
     """Flow sensitivity may only remove edges: its graph is a subgraph of the flow-insensitive one."""
-    fs = _analyze(case, monkeypatch)
-    fi = _analyze(case, monkeypatch, flow_sensitive=False)
+    fs = _analyze(case)
+    fi = _analyze(case, flow_sensitive=False)
     assert fs <= fi, "\n".join([f"{case.name}: flow-sensitive edges missing from the flow-insensitive graph",
                                  _fmt("only flow-sensitive", fs - fi)])
 
@@ -161,6 +159,5 @@ def _smoke() -> list[Path]:
 
 
 @pytest.mark.parametrize("path", _smoke(), ids=lambda p: str(p.relative_to(EXAMPLES)))
-def test_example_runs(path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(path.parent)
-    analyze_file(path.name)
+def test_example_runs(path: Path) -> None:
+    analyze_file(path)

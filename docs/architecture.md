@@ -11,12 +11,14 @@ the qualified name inside it.
 
 ```
 source text
-  │  extract.build_program(source, filename)  /  extract.parse_file(path)
+  │  extract.build_program(source, filename)  /  extract.parse_files(paths, search_path)
   ▼
 Program    funcs     FuncId  -> FuncInfo   kind, lexical parent, Sig, locals, globals, nonlocals, owner class
            classes   ClassId -> ClassInfo  enclosing function, body, known_attrs
            cfgs      FuncId  -> CFG        cfg.build_cfg, one per function
-           fingerprint                     sha256 of file name + source
+           modules   name    -> ModuleInfo file, module body, package flag, star exports
+           entries                         module bodies of the entry files (the roots)
+           fingerprint                     sha256 of every file name + source
   │  solver.solve(prog, state=None, ...)   (pipeline.run_passes with one CallGraphPass)
   ▼
 State      contexts, local envs, return values, call edges, heap, class tables  (transfer.State)
@@ -28,7 +30,9 @@ CallGraph  nodes, edges, sites, labels, state   ──  .icfg() -> icfg.ICFG
 JSON / DOT
 ```
 
-`analyze_source` and `analyze_file` in `__init__.py` chain these three calls. `persist`
+`analyze_source`, `analyze_file` and `analyze_files` in `__init__.py` chain these three
+calls. `build_program` makes a one-module program from a string; `parse_files` (and
+`parse_file`) load the entry files and every project module they import. `persist`
 saves a `State` and resumes it. `pipeline.run_passes` runs the call graph pass alongside
 other passes.
 
@@ -38,19 +42,19 @@ Each module imports only modules listed above it.
 
 | Module | Lines | Role | Key symbols |
 |---|---|---|---|
-| `model.py` | 532 | data types only (hashing, labels) | `FuncId`, `ClassId`, the 10 token classes, `Token`, `Vals`, `EMPTY`, `Ctx`, `Node`, `Site`, `Edge`, `CFG`, `CFGNode`, `CFGEdge`, `IEdge`, CFG kind constants, `token_label` |
+| `model.py` | 564 | data types only (hashing, labels) | `FuncId`, `ClassId`, `module_name`, the 11 token classes, `Token`, `Vals`, `EMPTY`, `Ctx`, `Node`, `Site`, `Edge`, `CFG`, `CFGNode`, `CFGEdge`, `IEdge`, CFG kind constants, `token_label` |
 | `cfg.py` | 478 | one CFG per function | `Builder` (`s_<Stmt>`, `expr`, `call_point`, `jump`), `build_cfg` |
-| `extract.py` | 342 | step 1: ids, scopes, signatures, CFGs | `build_program`, `parse_file`, `Program`, `FuncInfo`, `ClassInfo`, `Sig`, `scope_locals`, `make_site`, `call_sites`, `fingerprint` |
-| `stubs.py` | 676 | models of builtin and stdlib callables | `@stub`, `STUBS`, `BUILTIN_NAMES`, `METHOD_STUBS`, `STUB_MODULES`, `Args`, `Host`, `call`, `fold` |
-| `transfer.py` | 1736 | the global `State`, and the interpreter of one function in one context | `State`, `Interp`, `analyze`, `mk_closure`, `_bind_attr`, `join_envs`, `BINOP_DUNDERS` / `UNARYOP_DUNDERS` / `CMP_DUNDERS`, `MAX_DEPTH` |
+| `extract.py` | 750 | step 1: loading modules, ids, scopes, signatures, CFGs | `build_program`, `parse_files`, `parse_file`, `Program`, `ModuleInfo`, `FuncInfo`, `ClassInfo`, `Sig`, `scope_locals`, `module_all`, `absolute_module`, `entry_module`, `_Loader`, `make_site`, `call_sites`, `fingerprint` |
+| `stubs.py` | 690 | models of builtin and stdlib callables | `@stub`, `STUBS`, `BUILTIN_NAMES`, `METHOD_STUBS`, `STUB_MODULES`, `Args`, `Host`, `call`, `fold` |
+| `transfer.py` | 1814 | the global `State`, and the interpreter of one function in one context | `State`, `Interp`, `analyze`, `mk_closure`, `_bind_attr`, `join_envs`, `BINOP_DUNDERS` / `UNARYOP_DUNDERS` / `CMP_DUNDERS`, `MAX_DEPTH` |
 | `pipeline.py` | 131 | generic multi-pass fixpoint driver | `Pass`, `PassState`, `Facts`, `run_passes` |
-| `solver.py` | 135 | the call graph pass | `init_state`, `step`, `CallGraphPass`, `solve`, `DEFAULT_MAX_CONTEXTS` |
+| `solver.py` | 140 | the call graph pass | `init_state`, `step`, `CallGraphPass`, `solve`, `DEFAULT_MAX_CONTEXTS` |
 | `icfg.py` | 138 | interprocedural CFG over context nodes | `ICFG`, `build_icfg`, `icfg_from_state`, `SYNTACTIC_KINDS` |
 | `callgraph.py` | 97 | the result object | `CallGraph`, `build_callgraph`, `node_label` |
-| `export.py` | 184 | JSON and Graphviz output | `to_dict`, `to_json`, `icfg_dict`, `to_dot`, `to_icfg_dot` |
-| `persist.py` | 384 | `State` / `Facts` to JSON and back | `save_state`, `load_state`, `state_to_dict`, `state_from_dict`, `facts_to_dict`, `facts_from_dict`, `CODECS`, `StateDoc`, `Row` |
-| `__init__.py` | 86 | public API | `analyze_source`, `analyze_file`, re-exports in `__all__` |
-| `__main__.py` | 98 | command line | `main`, `print_graph` |
+| `export.py` | 186 | JSON and Graphviz output | `to_dict`, `to_json`, `icfg_dict`, `to_dot`, `to_icfg_dot` |
+| `persist.py` | 393 | `State` / `Facts` to JSON and back | `save_state`, `load_state`, `state_to_dict`, `state_from_dict`, `facts_to_dict`, `facts_from_dict`, `CODECS`, `StateDoc`, `Row` |
+| `__init__.py` | 115 | public API | `analyze_source`, `analyze_file`, `analyze_files`, re-exports in `__all__` |
+| `__main__.py` | 105 | command line | `main`, `print_graph` |
 
 **Reading `transfer.py`:** `State` comes first (tables, joins, MRO, `resolve`). `Interp`
 follows, split by banner comments:
@@ -60,15 +64,17 @@ follows, split by banner comments:
 - `expressions`: `e_<Expr>`, `attribute`
 - `statements`: `s_<Stmt>`
 - `control flow (flow mode)`: `_path`, `_meet`, `_loop`, `s_If` / `s_While` / `s_Try`
+- `modules`: `run_module`, `module_attr`, `import_any`, `s_Import`, `s_ImportFrom`
 
 `analyze` is last.
 
 ## Data types (`model.py`)
 
-**Ids.** `FuncId(qualname, file, lineno, col)` identifies one def, async def, lambda or module
-body (`<module>`). `ClassId` has the same fields. `render(style)` returns `full`
-(`file:line:col:qualname`, the unique `uid`), `module` (`pkg.mod.qualname`) or `short`
-(`qualname`).
+**Ids.** `FuncId(qualname, file, lineno, col, module)` identifies one def, async def, lambda or
+module body (`<module>`). `ClassId` has the same fields. `module` is the dotted name of the
+defining module; it is not part of the identity, and when it is left empty it is derived from
+`file` (`model.module_name`). `render(style)` returns `full` (`file:line:col:qualname`, the
+unique `uid`), `module` (`pkg.mod.qualname`) or `short` (`qualname`).
 
 **Tokens.** An abstract value `Vals` is a `frozenset` of tokens, and `EMPTY` means nothing
 callable is known. Each token has a `depth`, which is not part of its equality, used to bound
@@ -85,6 +91,7 @@ nesting.
 | `ClassMethod(func)`, `StaticMethod(func)` | the descriptors | their stubs; also implied for `__init_subclass__` and `__new__` in class bodies |
 | `Super(start, receiver)` | a `super()` proxy | `super` stub |
 | `Property(fget, fset, fdel)` | a property descriptor | `property` stub, `.getter` / `.setter` / `.deleter` |
+| `Module(name)` | a module object of the program; its attributes are its globals and submodules | `Interp.s_Import`, `s_ImportFrom`, `import_any` |
 
 `Alloc(func, line, col)` is an allocation site.
 
@@ -94,8 +101,9 @@ nesting.
   - `params`: sorted `(name, tokens)` pairs, only for parameters whose value is non-empty.
   - `parent`: the node in which a closure was defined.
   - `merged`: marks a widened context; its entry state is stored in `State.entry`.
-- `Node(func, ctx)` is one analysed instance of a function. The root is
-  `Node(prog.module, Ctx())`.
+- `Node(func, ctx)` is one analysed instance of a function. The roots are
+  `Node(entry, Ctx())` for each of `prog.entries`, and an imported module's body runs as
+  `Node(<module>, Ctx())` too.
 - `Site(caller, line, col, text, kind)` is a place where a call happens.
   - `call` and `decorator` are *syntactic*: they are CFG call points, and
     `extract.call_sites` lists them.
@@ -128,7 +136,7 @@ contexts.
 | `class_attrs` | `ClassId -> Env` | class namespace: methods, class attributes, attributes set on the class |
 | `inst_attrs` | `Instance -> Env` | attributes of each abstract object |
 | `heap` | `Box -> Vals` | what was stored into each container after it was created |
-| `extern` | `FuncId -> Env` | writes to a function's locals from inner scopes (`global`, `nonlocal`) |
+| `extern` | `FuncId -> Env` | writes from other scopes: `global` and `nonlocal`, and `module.attr = v` into a module body |
 | `bases`, `metaclasses` | `ClassId -> ...` | direct user bases and metaclasses (`State.mro` computes and caches the MRO) |
 | `changed` | `bool` | set by any write that grew something during the current round |
 
@@ -157,7 +165,10 @@ Writes go through joining helpers, all of which set `changed`: `register`, `reso
 | How does a builtin or stdlib callable behave? | `stubs.py` (the `@stub` registry) |
 | What does one round do, and what is the global loop? | `solver.step`, `pipeline.run_passes` |
 | What are the roots, and what does `include_unreachable` do? | `solver.init_state` |
-| How are locals, signatures and qualnames computed? | `extract.build_program`, `scope_locals`, `make_sig` |
+| How are locals, signatures and qualnames computed? | `extract._Builder.add_module`, `scope_locals`, `make_sig` |
+| Which files are loaded, and how is a module name resolved? | `extract.parse_files`, `_Loader.find`, `_Loader.imports`, `entry_module`, `absolute_module` |
+| What does `import` or `from m import x` bind, and what is `mod.attr`? | `Interp.s_Import`, `s_ImportFrom`, `module_attr`, `run_module` |
+| Which names does `from m import *` bind? | `extract.module_all`, `_Builder.link_star_imports`, `ModuleInfo.exports` |
 | What CFG does a statement get? | `cfg.Builder.s_<Stmt>`, `Builder.expr` |
 | How are ICFG calls and returns wired? | `icfg.ICFG.call_edges`, `return_edges`, `build_icfg` |
 | How are labels like `f[x={g}]` built? | `callgraph.node_label`, `model.token_label` |
@@ -169,7 +180,7 @@ Writes go through joining helpers, all of which set `changed`: `register`, `reso
 - **Results only grow.** Every write to `State` is a join. Re-solving a fixpoint therefore
   changes nothing (`State.same_result`), a saved state can be resumed, and passes can be
   chained, for example reachable code first and then `include_unreachable=True`.
-- **One program version per state.** `Program.fingerprint` (file name + source) is checked by
+- **One program version per state.** `Program.fingerprint` (every file name + source) is checked by
   `solver.init_state`, `pipeline.run_passes` and `persist.state_from_dict`. A resumed state
   keeps its own `max_ctx` and `flow`, and asking for different values raises `ValueError`.
 - **The CFG and the interpreter agree on call sites.** `extract.call_sites` reads `CFG.calls`,

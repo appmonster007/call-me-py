@@ -1,7 +1,7 @@
 # call-me-py
 
-A static analyzer that builds the call graph of a Python file, including calls that go
-through *function values*: callbacks, lambdas, closures, decorators, `functools.partial`,
+A static analyzer that builds the call graph of a Python program, following its imports
+across files, including calls that go through *function values*: callbacks, lambdas, closures, decorators, `functools.partial`,
 methods reached through objects, and the dunder methods behind operators. It never runs the
 program.
 
@@ -46,8 +46,13 @@ python -m callme prog.py --format dot -o graph.dot           # one node per func
 python -m callme prog.py --format dot --contexts -o ctx.dot  # one node per (function, context)
 python -m callme prog.py --format icfg -o icfg.dot           # interprocedural CFG
 python -m callme prog.py --id-style short --include-unreachable -o graph.json
+python -m callme examples/project/main.py --id-style module --format dot -o /dev/stdout
+python -m callme a.py b.py --path src -o graph.json         # two entry files, imports also from src/
 ```
 
+Imports of project modules are followed: starting from each entry file, callme loads every
+module it imports, looking in the entry's directory (as Python does with `sys.path[0]`) and in
+each `--path`. Imports it cannot find there, such as the standard library, stay external.
 Nothing is written without `-o` (use `-o /dev/stdout` to print). For every flag and the
 output layouts, see [docs/output.md](docs/output.md).
 
@@ -64,7 +69,8 @@ print(to_dot(cg, contexts=True))
 cg2 = analyze_file("prog.py", state=cg.state, include_unreachable=True)
 ```
 
-`analyze_source(text, filename)` does the same for a string.
+`analyze_files([...], search_path=[...])` takes several entry files, and
+`analyze_source(text, filename)` analyses a string as one module, without following imports.
 
 ## How it works
 
@@ -74,10 +80,11 @@ source ─► extract ─► Program ─► solver ─► State ─► callgraph
           signatures, CFGs      (function, context)   sites, labels
 ```
 
-1. **extract** parses the file. Every function (def, lambda, module body) and class gets an
-   id, a scope (its locals, globals and nonlocals), a signature and a control-flow graph.
-2. **solver** starts at the module body and abstractly interprets each (function, context)
-   node. A value is a set of *tokens*: closures, classes, instances, containers or builtin stubs.
+1. **extract** parses the entry files and every project module they import. Every function
+   (def, lambda, module body) and class gets an id, a scope (its locals, globals and
+   nonlocals), a signature and a control-flow graph.
+2. **solver** starts at the entry module bodies and abstractly interprets each (function,
+   context) node; an import makes the imported module's body reachable. A value is a set of *tokens*: closures, classes, instances, containers or builtin stubs.
    A call with new argument values creates a new context. Rounds repeat until nothing grows.
 3. **callgraph** turns the solver state into context nodes and call edges, plus a view with
    one node per function. **export** writes the result as JSON or DOT.
@@ -90,14 +97,18 @@ functions stored in lists, dicts and object fields; classes with inheritance (C3
 `super`, `classmethod`/`staticmethod`/`property`, descriptors, metaclasses,
 `__init_subclass__` and dataclasses; dunder calls implied by operators, subscripts,
 iteration, `with` and f-strings; flow sensitivity (rebinding, branches, loops, `try`, `match`);
-builtin and stdlib higher-order functions (`map`, `sorted`, `functools.reduce`, ...) through stubs.
+builtin and stdlib higher-order functions (`map`, `sorted`, `functools.reduce`, ...) through stubs;
+programs spread over several files: absolute and relative imports, packages and namespace
+packages, `import *` with or without `__all__`, circular and lazy imports, and modules passed
+around as values.
 
-**Not handled:** imports of other project files (one file at a time; only `functools`,
-`itertools` and `dataclasses` are modelled); `eval`/`exec`, string-based `getattr`/`setattr`
-and classes created by calling `type(...)`; callbacks run by threads or event loops; implicit
-exceptions outside a `try`. A call whose target is unknown gets no edge. The test families
-`implicit`, `concurrency`, `modules` and `dynamic` are only partly supported, so `pytest.ini`
-leaves them out of the default run.
+**Not handled:** the source of the standard library and third-party packages (only
+`functools`, `itertools`, `dataclasses` and `importlib` are modelled); `eval`/`exec`,
+string-based `getattr`/`setattr` and classes created by calling `type(...)`; module names
+that are computed at run time (`importlib.import_module(name)` may return any loaded module);
+callbacks run by threads or event loops; implicit exceptions outside a `try`. A call whose
+target is unknown gets no edge. The test families `implicit`, `concurrency` and `dynamic` are
+only partly supported, so `pytest.ini` leaves them out of the default run.
 
 ## Repository layout
 
@@ -127,8 +138,9 @@ pytest --families hof,stdlib -k sound   # a subset; test ids are <family>/<case>
 - `test_flow_refines`: the flow-sensitive edges are a subset of the flow-insensitive ones.
 
 The other test files cover the core cases (`test_cases`, `test_unit`), CFGs and the ICFG
-(`test_cfg`), classes (`test_classes`), the heap (`test_heap`), multi-pass runs and saved
-state (`test_multipass`), and whether the explainer's data is up to date (`test_docs`).
+(`test_cfg`), classes (`test_classes`), the heap (`test_heap`), multi-file programs
+(`test_modules`), multi-pass runs and saved state (`test_multipass`), and whether the
+explainer's data is up to date (`test_info`).
 
 ## Documentation
 

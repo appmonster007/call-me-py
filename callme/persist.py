@@ -30,6 +30,7 @@ from .model import (
     Edge,
     FuncId,
     Instance,
+    Module,
     Node,
     ParamState,
     Property,
@@ -42,7 +43,7 @@ from .model import (
 from .pipeline import Facts, PassState
 from .transfer import Env, State
 
-FORMAT, VERSION = "callme-state", 3  # v3: flow_sensitive
+FORMAT, VERSION = "callme-state", 4  # v3: flow_sensitive; v4: module tokens
 
 Path = str | os.PathLike[str]
 
@@ -63,9 +64,11 @@ Row = (  # one entry of the values table, tagged by kind
     | tuple[Literal["staticmethod"], int]
     | tuple[Literal["super"], str, int]  # start class uid, receiver
     | tuple[Literal["property"], Ids, Ids, Ids]  # fget, fset, fdel
+    | tuple[Literal["module"], str]  # dotted module name
 )
 ROW_LEN = {"node": 5, "clo": 4, "builtin": 4, "class": 2, "inst": 3, "box": 3, "bound": 3,
-           "classmethod": 2, "staticmethod": 2, "super": 3, "property": 4}  # per Row kind
+           "classmethod": 2, "staticmethod": 2, "super": 3, "property": 4,
+           "module": 2}  # per Row kind
 
 
 class StateDoc(TypedDict):
@@ -169,6 +172,8 @@ class _Encoder:
             row = ("staticmethod", self.tok(t.func))
         elif isinstance(t, Super):
             row = ("super", t.start.uid, self.tok(t.receiver))
+        elif isinstance(t, Module):
+            row = ("module", t.name)
         else:
             row = ("property", self.toks(t.fget), self.toks(t.fset), self.toks(t.fdel))
         return self._add(t, row)
@@ -215,7 +220,7 @@ def state_from_dict(prog: Program, d: object) -> State:
     """Decode a `state_to_dict` document, such as one read with `json.load`, for `prog`.
 
     Function and class uids are resolved against `prog`. Raises `ValueError` if the header
-    is not "callme-state" version 3, if the document was produced for another program or
+    is not "callme-state" version 4, if the document was produced for another program or
     version of it (the fingerprints differ), or if a row is malformed or names an unknown
     id.
     """
@@ -305,6 +310,10 @@ def state_from_dict(prog: Program, d: object) -> State:
                 vals.append(Super(cls(uid), recv(r)))
             case ("property", fget, fset, fdel):
                 vals.append(Property(toks(fget), toks(fset), toks(fdel)))
+            case ("module", name):
+                if name not in prog.modules:
+                    raise ValueError(f"unknown module {name!r}")
+                vals.append(Module(name))
 
     def env(e: EnvDoc) -> Env:
         """Decode an environment."""

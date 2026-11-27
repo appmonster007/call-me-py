@@ -6,23 +6,28 @@ layouts, and saved state files.
 ## Command line (`callme/__main__.py`)
 
 ```
-python -m callme FILE [-o OUT] [options]     # run from the repo root; nothing is written without -o
+python -m callme FILE [FILE ...] [-o OUT] [options]   # run from the repo root; nothing is written without -o
 ```
+
+Each `FILE` is an entry: its module body is a root of the analysis, and every project module
+it imports is loaded too, transitively. Modules are looked up in each entry's root directory
+(the entry's own directory, or the directory above its package), then in each `--path`.
 
 | Flag | Effect |
 |---|---|
 | `-o`, `--output PATH` | write the graph to `PATH` (`/dev/stdout` prints it) |
+| `--path DIR` | also search `DIR` for imported modules; repeatable, like `PYTHONPATH` |
 | `--format json\|dot\|icfg` | JSON (the default), a call graph in DOT, or the interprocedural CFG in DOT |
 | `--icfg` | JSON only: add the `icfg` key (CFGs plus call and return edges) |
 | `--contexts` | DOT only: one node per (function, context) instead of per function |
 | `--returns` | DOT only: add dotted return edges from callee to caller |
-| `--include-unreachable` | also analyse functions that are never called from the module body |
+| `--include-unreachable` | also analyse functions that are never called, and modules that are never imported |
 | `--id-style full\|module\|short`, `--short-ids` | how functions are named (see below); `--short-ids` is `--id-style short` |
 | `--max-contexts N` | contexts per function before widening (default 16) |
 | `--flow-insensitive` | treat each local as the union of all its bindings |
 | `--print-graph` | write the lexical nesting edges and every call site to stderr |
 | `--save-state PATH` | save the solver state after this run |
-| `--load-state PATH` | resume from a state saved for the same, unchanged `FILE` |
+| `--load-state PATH` | resume from a state saved for the same, unchanged files |
 
 A two-pass run from the shell, with reachable code first and then everything else:
 
@@ -52,7 +57,11 @@ apply -> f(v) @6:11 [call]
 | `module` | `module.qualname` | `app.Outer.make.inner` |
 | `short` | `qualname` | `Outer.make.inner` |
 
-`file` is the path exactly as it was given. Qualname rules:
+`file` is the path exactly as it was given, or for an imported module the path it was found
+under. `module` is the module's dotted name relative to its import root: `main.py` is `main`,
+and `app/core.py` in package `app` is `app.core`. `analyze_source` and `build_program` have no
+import root, so they derive the name from the file name as given (`pkg/m.py` is `pkg.m`).
+Qualname rules:
 
 - the module body is `<module>`;
 - a nested def is `outer.inner`, and a method is `Class.method`;
@@ -83,6 +92,7 @@ Nodes that would get the same label (they differ only in their closure parent) g
 | `ClassMethod`, `StaticMethod` | `classmethod(f)`, `staticmethod(f)` |
 | `Super` | `super(C, <receiver>)` |
 | `Property` | `property(<fget>)` |
+| `Module` | `<module pkg.core>` |
 
 ## JSON (`export.to_dict`)
 
@@ -104,8 +114,9 @@ apply(square, 2)
 ```json
 {
   "file": "tiny.py",
-  "functions": [{"id": "apply", "kind": "def", "file": "tiny.py", "line": 5, "col": 0,
-                 "name": "apply", "parent": "<module>", "reachable": true}],
+  "modules": [{"name": "tiny", "file": "tiny.py"}],
+  "functions": [{"id": "apply", "kind": "def", "module": "tiny", "file": "tiny.py", "line": 5,
+                 "col": 0, "name": "apply", "parent": "<module>", "reachable": true}],
   "sites": [{"caller": "apply", "line": 6, "col": 11, "text": "f(v)", "kind": "call",
              "targets": ["square"]}],
   "edges": [{"caller": "apply", "callee": "square"}],
@@ -117,7 +128,8 @@ apply(square, 2)
 
 | Key | One entry per | Fields |
 |---|---|---|
-| `functions` | function in the file, reachable or not | `id`, `kind` (`module` / `def` / `lambda`), `file`, `line`, `col`, `name` (the qualname), `parent` (id of the lexical parent, or `null`), `reachable` |
+| `modules` | loaded module, in load order: the entry files (each after its parent packages), then what they import | `name` (dotted), `file` (`null` for a namespace package) |
+| `functions` | function of any loaded module, reachable or not | `id`, `kind` (`module` / `def` / `lambda`), `module`, `file`, `line`, `col`, `name` (the qualname), `parent` (id of the lexical parent, or `null`), `reachable` |
 | `sites` | syntactic call site of a reachable function, then each implicit site that got an edge | `caller`, `line`, `col`, `text` (at most 60 characters; decorators start with `@`), `kind` (see [architecture.md](architecture.md#data-types-modelpy)), `targets` (callee ids) |
 | `edges` | distinct (caller, callee) pair of functions | `caller`, `callee` |
 | `contexts` | analysed (function, context) node | `id` (its context label), `function`, `context` (`{param: [token labels]}`, or `{"*": []}` when widened) |
@@ -147,19 +159,20 @@ To render: `dot -Tsvg graph.dot -o graph.svg` (Graphviz).
 
 `--save-state` and `persist.save_state` write the solver `State` as JSON (`persist.StateDoc`):
 
-- **Header:** `format: "callme-state"`, `version: 3`, `program` (the fingerprint), `max_ctx`,
-  `flow_sensitive`.
+- **Header:** `format: "callme-state"`, `version: 4`, `program` (the fingerprint), `max_ctx`,
+  `flow_sensitive`. Version 4 added `module` rows; older documents are rejected.
 - **`values`:** one table holding every `Node` and token. Children come before parents, and
   each row is tagged by kind: `node`, `clo`, `builtin`, `class`, `inst`, `box`, `bound`,
-  `classmethod`, `staticmethod`, `super`, `property`. `persist.Row` gives each row's layout.
+  `classmethod`, `staticmethod`, `super`, `property`, `module`. `persist.Row` gives each
+  row's layout.
   Everything else in the document refers to rows by index.
 - **The rest:** `order`, `envs`, `ret`, `entry`, `edges`, `class_attrs`, `inst_attrs`,
   `heap`, `extern`, `bases` and `metaclasses` mirror the [`State` fields](architecture.md#solver-state-transferstate).
   Function and class ids are stored as full uids, and loading resolves them against the
   `Program`.
 
-`persist.load_state(prog, path)` and `--load-state` require the same file name and source
-(the fingerprint), and they keep the state's `max_ctx` and flow mode. Asking for a different
+`persist.load_state(prog, path)` and `--load-state` require the same file names and sources,
+imported modules included (the fingerprint), and they keep the state's `max_ctx` and flow mode. Asking for a different
 value raises `ValueError: max_contexts=4 conflicts with state.max_ctx=16`.
 
 A multi-pass `Facts` store is saved by `persist.facts_to_dict` as

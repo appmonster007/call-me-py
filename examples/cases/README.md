@@ -108,6 +108,8 @@ A new family is just a new folder; `families = all` picks it up.
 
 ### `modules`: multi-file cases: imports, packages, cycles
 
+Each case is a directory; callme follows `main.py`'s imports into the other files.
+
 | #  | Case | Feature |
 |----|------|---------|
 | 36 | modules_alias_imports | aliases, re-exports, relative imports |

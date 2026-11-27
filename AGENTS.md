@@ -1,7 +1,7 @@
 # AGENTS.md
 
-call-me-py builds context-sensitive call graphs for single Python files by abstract
-interpretation. The package is `callme/`, it uses only the standard library, and it needs
+call-me-py builds context-sensitive call graphs for Python programs by abstract
+interpretation, following imports from the entry files into every project module. The package is `callme/`, it uses only the standard library, and it needs
 Python ≥ 3.12. Read [README.md](README.md) for an overview and `docs/` for details. The docs
 are written so that you rarely need to read `transfer.py` in full, and every function's
 docstring states its contract, so reading a definition's first lines is usually enough.
@@ -13,6 +13,7 @@ pytest                                    # the families selected in pytest.ini
 pytest --families all -k sound -x         # every family, soundness checks only
 python -m callme FILE -o out.json         # nothing is printed without -o
 python -m callme FILE --format dot --contexts --id-style short -o /dev/stdout
+python -m callme examples/project/main.py --id-style module -o out.json  # a multi-file program
 python info/build.py                      # after changing callme/: regenerate info/generated/data.js
 ```
 
@@ -20,15 +21,15 @@ python info/build.py                      # after changing callme/: regenerate i
 
 | File | Lines | What it holds |
 |---|---|---|
-| `callme/model.py` | 532 | every data type: ids, tokens, `Ctx` / `Node` / `Site` / `Edge`, CFG types |
+| `callme/model.py` | 564 | every data type: ids, tokens, `Ctx` / `Node` / `Site` / `Edge`, CFG types |
 | `callme/cfg.py` | 478 | CFG builder, one CFG per function |
-| `callme/extract.py` | 342 | parsing into a `Program`: ids, scopes, signatures, call sites |
-| `callme/stubs.py` | 676 | models of builtin and stdlib functions (`@stub` registry) |
-| `callme/transfer.py` | 1736 | `State` (global tables) and `Interp` (abstract interpreter); read it by banner section |
-| `callme/pipeline.py`, `solver.py` | 131, 135 | the multi-pass driver and the call graph pass (`solve`) |
-| `callme/icfg.py`, `callgraph.py`, `export.py` | 138, 97, 184 | the ICFG, the `CallGraph` result, JSON / DOT |
-| `callme/persist.py` | 384 | saving and loading state |
-| `callme/__init__.py`, `__main__.py` | 86, 98 | public API, CLI |
+| `callme/extract.py` | 750 | loading files into a `Program`: import resolution, ids, scopes, signatures, call sites |
+| `callme/stubs.py` | 690 | models of builtin and stdlib functions (`@stub` registry) |
+| `callme/transfer.py` | 1814 | `State` (global tables) and `Interp` (abstract interpreter); read it by banner section |
+| `callme/pipeline.py`, `solver.py` | 131, 140 | the multi-pass driver and the call graph pass (`solve`) |
+| `callme/icfg.py`, `callgraph.py`, `export.py` | 138, 97, 186 | the ICFG, the `CallGraph` result, JSON / DOT |
+| `callme/persist.py` | 393 | saving and loading state |
+| `callme/__init__.py`, `__main__.py` | 115, 105 | public API, CLI |
 
 | Need | Read |
 |---|---|
@@ -49,8 +50,12 @@ python info/build.py                      # after changing callme/: regenerate i
 - Keep abstract values finite: anything that can nest needs a depth or widening bound.
 - `EXPECTED` edges in a case docstring are ground truth from a traced run, so change the
   analyzer to make a case pass, not the expected edges.
+- Modules: finding and loading files, module names and `__all__` belong in `extract.py`
+  (`_Loader`, `_Builder`); what an import binds at analysis time belongs in the `modules`
+  section of `transfer.Interp`. Running an imported module registers its body as a node but
+  records no call edge.
 - `info/generated/data.js` is generated: rerun `python info/build.py` instead of editing it.
-  `tests/test_docs.py` runs `--check`.
+  `tests/test_info.py` runs `--check`.
 - Style: `from __future__ import annotations`, full type hints (`pyrightconfig.json`), frozen
   dataclasses with cached hashes for values, and no runtime dependencies.
 - Docstrings: every function and class has one (trivial dunders such as `__hash__` excepted),

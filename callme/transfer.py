@@ -29,7 +29,7 @@ import ast
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import final
 
-from .extract import FuncInfo, Program, make_site, pattern_names
+from .extract import FuncInfo, Program, absolute_module, make_site, pattern_names
 from .model import (
     EMPTY,
     Alloc,
@@ -44,6 +44,7 @@ from .model import (
     Edge,
     FuncId,
     Instance,
+    Module,
     Node,
     ParamState,
     Property,
@@ -117,7 +118,7 @@ class State:
     class_attrs: dict[ClassId, Env]  # class-level attribute table per class
     inst_attrs: dict[Instance, Env]  # instance attributes per abstract object
     heap: dict[Box, Vals]  # what was stored into each container after its creation
-    extern: dict[FuncId, Env]  # writes to a function's locals from inner scopes (global / nonlocal)
+    extern: dict[FuncId, Env]  # writes from other scopes: global / nonlocal, and `module.attr = v`
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
@@ -202,7 +203,11 @@ class State:
             self.changed = True
 
     def add_extern(self, func: FuncId, name: str, vals: Vals) -> None:
-        """Join `vals` into the `global` or `nonlocal` writes to local `name` of `func`."""
+        """Join `vals` into the writes to variable `name` of `func` made from other scopes.
+
+        These are `global` and `nonlocal` writes, and attribute writes to a module object,
+        which `func`, a module body, then holds as a global.
+        """
         env = self.extern.setdefault(func, {})
         old = env.get(name, EMPTY)
         if not vals <= old:
@@ -499,7 +504,7 @@ class Interp:
                 for acc in (self.summary, *self.tries):
                     acc[name] = acc.get(name, EMPTY) | vals
         elif vals and not self.readonly and name in self.info.globals:
-            self.state.add_extern(self.prog.module, name, vals)
+            self.state.add_extern(self.prog.module_body(self.info.id), name, vals)
         elif vals and not self.readonly and name in self.info.nonlocals:
             owner = self.nonlocal_owner(name)
             if owner is not None:
@@ -508,7 +513,7 @@ class Interp:
     def nonlocal_owner(self, name: str) -> FuncId | None:
         """Return the nearest enclosing function with local `name`, which `nonlocal name` writes."""
         f = self.info.parent
-        while f is not None and f != self.prog.module:
+        while f is not None and self.prog.funcs[f].kind != "module":
             if name in self.prog.funcs[f].locals:
                 return f
             f = self.prog.funcs[f].parent
@@ -573,8 +578,8 @@ class Interp:
 
         On an instance, a custom `__setattr__` is called instead if the class has one, then a
         data descriptor's setter; only when neither exists is the value joined into the instance
-        attribute. On a class object it is joined into the class attribute. Read-only mode
-        writes nothing.
+        attribute. On a class object it is joined into the class attribute, and on a module
+        into that module's global (`State.extern`). Read-only mode writes nothing.
         """
         for t in objs:
             if isinstance(t, Instance):
@@ -589,6 +594,10 @@ class Interp:
                         self.state.add_inst_attr(t, attr, vals)
             elif isinstance(t, ClassObj) and not self.readonly:
                 self.state.add_class_attr(t.cls, attr, vals)
+            elif isinstance(t, Module) and not self.readonly:
+                body = self.prog.modules[t.name].func
+                if body is not None:  # a namespace package has no globals of its own
+                    self.state.add_extern(body, attr, vals)
 
     def assign(self, t: ast.expr, vals: Vals) -> None:
         """Assign `vals` to an assignment target, following Python's forms of target.
@@ -791,8 +800,8 @@ class Interp:
         Instance     its class's `__call__`
         StaticMethod its function is called unbound
 
-        Other tokens are not callable and are skipped. In read-only mode no context is
-        registered and no edge is recorded.
+        Other tokens, modules among them, are not callable and are skipped. In read-only mode
+        no context is registered and no edge is recorded.
 
         star    values passed through `*args`, or None when the call has no `*` argument
         kwstar  values passed through `**kwargs`, or None when the call has no `**` argument
@@ -836,7 +845,7 @@ class Interp:
                     bound_call = frozenset(_bind_attr(t, tok.cls, tok) for t in call_fn if t != tok)
                     out |= self.apply(bound_call, pos, star, kws, kwstar, site)
                 continue
-            if isinstance(tok, (ClassMethod, Super, Property, Box)):
+            if isinstance(tok, (ClassMethod, Super, Property, Box, Module)):
                 continue
             params = self.bind_args(tok, pos, star, kws, kwstar)
             if params is None:
@@ -1119,7 +1128,8 @@ class Interp:
         classmethod and staticmethod binding, then metaclass attributes. On an instance: its
         own attribute, then class attributes bound as methods, property getters and descriptor
         `__get__`, then `__getattr__` when nothing else defines the name. On `super()`: the MRO
-        after the start class, for classes and for metaclasses. Builtin method names in
+        after the start class, for classes and for metaclasses. On a module: its global or
+        submodule of that name (`module_attr`). Builtin method names in
         `METHOD_STUBS` become their stub, bound to the receiver, when nothing else matched.
         """
         out: set[Token] = set()
@@ -1127,6 +1137,8 @@ class Interp:
         for t in v:
             if isinstance(t, Builtin) and f"{t.name}.{e.attr}" in STUBS:
                 out.add(Builtin(f"{t.name}.{e.attr}"))
+            elif isinstance(t, Module):
+                out.update(self.module_attr(t.name, e.attr))
             elif isinstance(t, Property):
                 if e.attr in ("getter", "setter", "deleter"):
                     out.add(Builtin(f"<property_{e.attr}>", (frozenset([t]),)))
@@ -1668,17 +1680,86 @@ class Interp:
 
     s_AsyncWith = s_With
 
+    # ------------------------------------------------------------ modules
+    def run_module(self, name: str) -> None:
+        """Run the body of program module `name` and of its parent packages, as an import does.
+
+        Each body's node is registered, so that it is analysed, but no call edge is recorded,
+        because a traced run shows no call into a module body either. A namespace package has
+        no body, and read-only mode registers nothing.
+        """
+        if self.readonly:
+            return
+        parts = name.split(".")
+        for i in range(1, len(parts) + 1):
+            info = self.prog.modules.get(".".join(parts[:i]))
+            if info is not None and info.func is not None:
+                self.state.register(Node(info.func, Ctx()))
+
+    def module_attr(self, name: str, attr: str) -> Vals:
+        """Return attribute `attr` of program module `name`: one of its globals, or a submodule.
+
+        A global's value is its summary in the module body, plus what other scopes stored
+        into it (`global` writes and `module.attr = ...`, in `State.extern`). A submodule
+        `name.attr` of the program is an attribute too, as Python sets it on its package once
+        it is imported.
+        """
+        out = EMPTY
+        body = self.prog.modules[name].func if name in self.prog.modules else None
+        if body is not None:
+            out = (self.state.union_env(body, attr)
+                   | self.state.extern.get(body, {}).get(attr, EMPTY))
+        sub = f"{name}.{attr}"
+        if sub in self.prog.modules:
+            out |= frozenset([Module(sub)])
+        return out
+
+    def import_any(self) -> Vals:
+        """Return every module of the program, and run each, as an import of an unknown name may.
+
+        This models `__import__(name)` and `importlib.import_module(name)`: the analysis does
+        not track strings, so any module may be the one imported.
+        """
+        for name in self.prog.modules:
+            self.run_module(name)
+        return frozenset(Module(n) for n in self.prog.modules)
+
     def s_Import(self, s: ast.Import) -> None:
-        """Run `import`: bind the modules in `STUB_MODULES`; other imports are not resolved."""
-        for a in s.names:  # only stub modules; project modules are not resolved here
-            if a.asname and a.name in STUB_MODULES:
+        """Run `import`: bind program modules as `Module`s and stub modules as `Builtin`s.
+
+        `import a.b.c` runs `a`, `a.b` and `a.b.c` and binds `a`; `import a.b.c as x` binds
+        `x` to `a.b.c` itself. A program module wins over a stub module of the same name. Any
+        other module binds nothing, so calls through it get no edge.
+        """
+        for a in s.names:
+            top = a.name.split(".")[0]
+            if a.name in self.prog.modules:
+                self.run_module(a.name)
+                self.bind(a.asname or top, frozenset([Module(a.name if a.asname else top)]))
+            elif a.asname and a.name in STUB_MODULES:
                 self.bind(a.asname, frozenset([Builtin(a.name)]))
-            elif not a.asname and a.name.split(".")[0] in STUB_MODULES:
-                top = a.name.split(".")[0]
+            elif not a.asname and top in STUB_MODULES:
                 self.bind(top, frozenset([Builtin(top)]))
 
     def s_ImportFrom(self, s: ast.ImportFrom) -> None:
-        """Run `from module import name`: bind the names that stub modules provide."""
+        """Run `from module import name`: bind attributes of a program module, or stubs.
+
+        For a program module, the module and its parent packages run, and each name is bound
+        to the module's attribute (`module_attr`); a name that is a submodule runs as well.
+        `from module import *` binds every name in the module's `exports`. A relative import
+        resolves against the current module's package. For other modules only the names
+        that stubs provide are bound.
+        """
+        base = absolute_module(self.prog.module_of(self.info.id), s.level, s.module)
+        if base is not None and base in self.prog.modules:
+            self.run_module(base)
+            for a in s.names:
+                star = a.name == "*"
+                for n in sorted(self.prog.modules[base].exports) if star else [a.name]:
+                    if f"{base}.{n}" in self.prog.modules:
+                        self.run_module(f"{base}.{n}")
+                    self.bind(n if star else a.asname or n, self.module_attr(base, n))
+            return
         if s.level or s.module not in STUB_MODULES:
             return
         for a in s.names:

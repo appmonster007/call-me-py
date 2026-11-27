@@ -1,25 +1,26 @@
 """Command-line interface for call-me-py (`python -m callme`).
 
-Parses CLI options, runs the call graph analysis on a single Python file, and
-writes the result as JSON, Graphviz DOT, or an interprocedural CFG (ICFG) DOT
-graph. Nothing is written unless `-o`/`--output` is given (except `--print-graph`
-to stderr).
+Parses CLI options, runs the call graph analysis on one or more Python entry
+files and the project modules they import, and writes the result as JSON,
+Graphviz DOT, or an interprocedural CFG (ICFG) DOT graph. Nothing is written
+unless `-o`/`--output` is given (except `--print-graph` to stderr).
 
 Usage:
-  python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns]
-                               [--icfg] [--flow-insensitive]
-                               [--load-state S] [--save-state S]
+  python -m callme FILE [FILE ...] -o OUT [--format json|dot|icfg] [--contexts]
+                               [--returns] [--icfg] [--flow-insensitive]
+                               [--path DIR] [--load-state S] [--save-state S]
 
-Multi-pass from the shell: `--save-state` writes the solver state to JSON and
-`--load-state` resumes it for the same, unchanged FILE (e.g. a second pass with
-`--include-unreachable`).
+Imported modules are looked up in each FILE's root directory, then in every
+`--path DIR`. Multi-pass from the shell: `--save-state` writes the solver state
+to JSON and `--load-state` resumes it for the same, unchanged files (e.g. a
+second pass with `--include-unreachable`).
 """
 import argparse
 import sys
 from collections.abc import Sequence
 
-from . import CallGraph, analyze_file, load_state, save_state, to_dot, to_icfg_dot, to_json
-from .extract import call_sites, parse_file
+from . import CallGraph, analyze_files, load_state, save_state, to_dot, to_icfg_dot, to_json
+from .extract import call_sites, parse_files
 
 
 def print_graph(cg: CallGraph) -> None:
@@ -40,7 +41,7 @@ def print_graph(cg: CallGraph) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse the command-line arguments, analyse the file, and write the requested outputs.
+    """Parse the command-line arguments, analyse the files, and write the requested outputs.
 
     Optionally resumes from a saved solver state (`--load-state`), saves the final state
     (`--save-state`), prints the program structure to stderr (`--print-graph`), and writes
@@ -51,14 +52,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns 0 on success.
     """
     ap = argparse.ArgumentParser(prog="callme", description=__doc__)
-    ap.add_argument("file")
+    ap.add_argument("files", nargs="+", metavar="FILE",
+                    help="entry file; the project modules it imports are analysed too")
+    ap.add_argument("--path", action="append", default=[], metavar="DIR",
+                    help="also search DIR for imported modules (repeatable, like PYTHONPATH)")
     ap.add_argument("--format", choices=["json", "dot", "icfg"], default="json",
                     help="icfg = DOT of the interprocedural CFG (one cluster per context)")
     ap.add_argument("--icfg", action="store_true", help="JSON: include CFGs and call/return edges")
     ap.add_argument("--contexts", action="store_true", help="DOT: one node per (function, context)")
     ap.add_argument("--returns", action="store_true", help="DOT: add dotted return edges")
     ap.add_argument("--include-unreachable", action="store_true",
-                    help="also analyse functions never called from the module body")
+                    help="also analyse functions never called and modules never imported")
     ap.add_argument("--id-style", choices=["full", "module", "short"], default="full",
                     help="function id text: file:line:col:qualname | module.qualname | qualname")
     ap.add_argument("--short-ids", dest="id_style", action="store_const", const="short",
@@ -71,13 +75,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     const=False, default=None,
                     help="treat each local as the union of all its bindings (less precise;"
                          + " default: flow-sensitive, or the loaded state's mode)")
-    ap.add_argument("--load-state", metavar="PATH", help="resume from a state saved for this file")
+    ap.add_argument("--load-state", metavar="PATH",
+                    help="resume from a state saved for these files")
     ap.add_argument("--save-state", metavar="PATH", help="save the solver state after this pass")
     ap.add_argument("-o", "--output", help="write the graph here; without it nothing is printed")
     a = ap.parse_args(argv)
-    state = load_state(parse_file(a.file), a.load_state) if a.load_state else None
-    cg = analyze_file(a.file, id_style=a.id_style, include_unreachable=a.include_unreachable,
-                      max_contexts=a.max_contexts, flow_sensitive=a.flow_sensitive, state=state)
+    state = (load_state(parse_files(a.files, search_path=a.path), a.load_state)
+             if a.load_state else None)
+    cg = analyze_files(a.files, id_style=a.id_style, search_path=a.path,
+                       include_unreachable=a.include_unreachable, max_contexts=a.max_contexts,
+                       flow_sensitive=a.flow_sensitive, state=state)
     if a.save_state:
         save_state(cg.state, a.save_state)
     if a.print_graph:
