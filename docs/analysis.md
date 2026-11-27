@@ -231,13 +231,15 @@ a traced run, where C frames are invisible.
 
 | Group | Names |
 |---|---|
-| higher-order | `map`, `filter`, `sorted`, `min`, `max`, `list.sort` (`key=`), `functools.reduce`, `itertools.accumulate` / `starmap` / `groupby` / `filterfalse` / `takewhile` / `dropwhile` |
-| wrappers | `functools.partial` (flattened and bounded), `functools.cache` / `lru_cache` / `wraps` / `update_wrapper` |
-| containers, pass-through | `list`, `set`, `dict` (each makes a new `Box`), `tuple`, `frozenset`, `enumerate`, `zip`, `itertools.chain` / `cycle` / `islice`, `dict.get`, and the `.values` / `.items` / `.keys` / `.copy` / `.pop` / `.popitem` methods |
-| dunder triggers | `len`, `str`, `repr`, `bool`, `hash`, `iter`, `next`, `reversed` |
-| classes | `classmethod`, `staticmethod`, `property`, `super`, `object`, `type`, `dataclasses.dataclass` |
-| imports | `__import__`, `importlib.import_module` (any module of the program, §11) |
-| internal (`<...>` and dotted) | `<partial>`, `<partial*>`, `<identity>`, `<dataclass>`, `<dataclass_init>`, `<property_getter>` / `_setter` / `_deleter`, `type.__call__`, `object.__new__`, `object.__setattr__` |
+| higher-order | `map`, `filter`, `sorted`, `min`, `max`, `list.sort` (`key=`), `iter(fn, sentinel)`, `functools.reduce` / `cmp_to_key`, `itertools.accumulate` / `starmap` / `groupby` / `filterfalse` / `takewhile` / `dropwhile` |
+| wrappers & dispatch | `functools.partial` / `partialmethod` (flattened and bounded), `functools.cache` / `lru_cache` / `wraps` / `update_wrapper` / `cached_property` / `total_ordering` / `singledispatch` / `singledispatchmethod` |
+| containers, pass-through | `list`, `set`, `dict` (each makes a new `Box`), `tuple`, `frozenset`, `enumerate`, `zip`, `collections.defaultdict` / `deque` / `OrderedDict` / `Counter` / `UserDict` / `UserList` / `ChainMap` / `namedtuple`, `itertools.chain` / `chain.from_iterable` / `cycle` / `islice` / `repeat` / `compress` / `zip_longest` / `product` / `permutations` / `combinations` / `combinations_with_replacement` / `pairwise` / `batched` / `tee` / `count`, `dict.get`, and the `.values` / `.items` / `.keys` / `.copy` / `.pop` / `.popleft` / `.popitem` methods |
+| dunder triggers | `len`, `str`, `repr`, `bool`, `hash`, `iter`, `next`, `aiter`, `anext`, `reversed`, `any`, `all`, `sum`, `abs`, `round`, `format`, `int`, `float`, `complex`, `bytes` |
+| classes & dataclasses | `classmethod`, `staticmethod`, `property`, `super`, `object`, `type`, `dataclasses.dataclass` / `field` / `replace` / `asdict` / `astuple` / `make_dataclass` |
+| context managers | `contextlib.contextmanager` / `asynccontextmanager` / `ExitStack` / `AsyncExitStack` / `closing` / `aclosing` / `nullcontext` / `suppress` / `redirect_stdout` / `redirect_stderr` / `chdir` |
+| concurrency | `threading.Thread` / `Timer` / `Barrier` (and sync primitives), `concurrent.futures.ThreadPoolExecutor` / `ProcessPoolExecutor` / `Future` / `as_completed` / `wait`, `asyncio.run` / `create_task` / `ensure_future` / `gather` / `wait` / `wait_for` / `shield` / `as_completed` / `to_thread` / `sleep` / `Future` / `TaskGroup` / `Queue` / `get_running_loop` / `get_event_loop` / `new_event_loop` |
+| imports | `__import__`, `importlib.import_module` (any module of the program, §11), `builtins` module |
+| internal (`<...>` and dotted) | `<partial>`, `<partial*>`, `<partialmethod>`, `<identity>`, `<singledispatch>`, `<cmp_to_key>`, `<dataclass>`, `<dataclass_init>`, `<contextmanager>`, `<exit_stack>`, `<defaultdict>`, `<thread>`, `<executor>`, `<future>`, `<event_loop>`, `<task_group>`, `<async_queue>`, `<property_getter>` / `_setter` / `_deleter`, `type.__call__`, `object.__new__`, `object.__setattr__` |
 
 A builtin name resolves to its stub only when no user binding shadows it. A method stub
 (`stubs.METHOD_STUBS`) applies when nothing else on the receiver matched the attribute.
@@ -307,12 +309,13 @@ module's `work`.
   string literal at an import call is not loaded. `importlib.import_module(name)` returns only
   the modules that were loaded, so the plugins named in a list in `dynamic/46_dynamic_import`
   are missed.
-- **Builtins without a stub**, such as `getattr`, `setattr`, `eval`, `exec`, three-argument
-  `type()`, `threading`, `asyncio` and `concurrent.futures`. Calls through them get no edges.
+- **Builtins without a stub**, such as `getattr`, `setattr`, `eval`, `exec`, and three-argument
+  `type()`. Calls through them get no edges.
 - **Implicit exceptions.** Only explicit `raise` and `assert` and points inside a `try` body
   can raise. In a handler, `except E as e` binds `e` to an instance of the caught classes.
-- **Coroutines and generators.** `await e` has the value of `e`, and a generator's `yield`
-  values are added to its return value.
+- **Coroutines and generators.** `await e` calls `__await__` if defined and otherwise has the
+  value of `e`; a generator's `yield` values are added to its return value. Calling an `async def`
+  runs its body immediately rather than deferring it to an event loop.
 - **Order dependence.** Context choice depends on argument values that may still be growing,
   so in rare cases the fixpoint depends on the order of iteration. `ORDER_DEPENDENT` in
   `tests/test_multipass.py` lists them, for example `hof/19_decorators`.

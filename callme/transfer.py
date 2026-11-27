@@ -55,7 +55,7 @@ from .model import (
     Vals,
     token_label,
 )
-from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUBS, Args
+from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUB_PACKAGES, STUBS, Args
 
 Env = dict[str, Vals]
 Calls = list[tuple[Site, Node]]
@@ -412,16 +412,23 @@ def _bind_attr(tok: Token, owner_cls: ClassId, receiver: ClassObj | Instance) ->
     """Return `tok` bound as Python binds an attribute read through `receiver`.
 
     A classmethod binds the owner class `owner_cls`, a staticmethod gives its function, and a
-    function read through an instance becomes a bound method. Other tokens are unchanged.
+    function read through an instance becomes a bound method. `partialmethod` and
+    `singledispatchmethod` tokens bind `receiver` as their first argument. Other tokens are
+    unchanged.
     """
     if isinstance(tok, ClassMethod):
         return BoundMethod(tok.func, ClassObj(owner_cls))
     if isinstance(tok, StaticMethod):
         return tok.func
-    if isinstance(receiver, Instance) and (
-        isinstance(tok, Closure) or (isinstance(tok, Builtin) and tok.name == "<dataclass_init>")
-    ):
-        return BoundMethod(tok, receiver)
+    if isinstance(receiver, Instance):
+        if isinstance(tok, Closure) or (isinstance(tok, Builtin) and tok.name == "<dataclass_init>"):
+            return BoundMethod(tok, receiver)
+        if isinstance(tok, Builtin) and tok.name == "<partialmethod>":
+            return Builtin("<partial>", (tok.bound[0], frozenset([receiver]), *tok.bound[1:]), tok.bound_kw)
+        if isinstance(tok, Builtin) and tok.name == "<partialmethod*>":
+            return Builtin("<partial*>", (tok.bound[0], frozenset([receiver]) | tok.bound[1]), tok.bound_kw)
+        if isinstance(tok, Builtin) and tok.name == "<singledispatchmethod>":
+            return BoundMethod(Builtin("<singledispatch>", tok.bound), receiver)
     return tok
 
 
@@ -648,10 +655,10 @@ class Interp:
 
     def invoke_dunder(self, recv: Vals, name: str, pos: Sequence[Vals],
                       site: Site) -> tuple[bool, Vals]:
-        """Call special method `name` on every instance in `recv` whose class defines it.
+        """Call special method `name` on every instance or stub object in `recv` that defines it.
 
-        Return whether any class defined it, and the union of the results. Values that are not
-        instances are skipped, so builtin behaviour stays with the stubs.
+        Return whether any token defined it, and the union of the results. A `Builtin` token
+        matches when `<tok.name>.<name>` is registered in `STUBS`.
         """
         found = False
         out = EMPTY
@@ -662,6 +669,10 @@ class Interp:
                     found = True
                     bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
                     out |= self.apply(bound, pos, None, {}, None, site)
+            elif isinstance(t, Builtin) and f"{t.name}.{name}" in STUBS:
+                found = True
+                out |= self.apply(frozenset([Builtin(f"{t.name}.{name}", t.bound, t.bound_kw)]),
+                                  pos, None, {}, None, site)
         return found, out
 
     def iterate(self, iterable: Vals, site: Site, *, is_async: bool = False) -> Vals:
@@ -930,9 +941,9 @@ class Interp:
         """
         d = self.state.deref
         added = EMPTY
-        if method in ("append", "add"):
+        if method in ("append", "appendleft", "add"):
             added = (pos[0] if pos else EMPTY) | (star or EMPTY)
-        elif method == "extend":  # takes an iterable: its elements
+        elif method in ("extend", "extendleft"):  # takes an iterable: its elements
             added = d((pos[0] if pos else EMPTY) | (star or EMPTY))
         elif method == "insert":
             added = (pos[1] if len(pos) > 1 else EMPTY) | (star or EMPTY)
@@ -1018,6 +1029,10 @@ class Interp:
                     bound = frozenset(_bind_attr(f, t.cls, t) for f in fn)
                     out |= self.apply(bound, [slc], None, {}, None, site)
                     continue
+            elif isinstance(t, Builtin) and f"{t.name}.__getitem__" in STUBS:
+                out |= self.apply(frozenset([Builtin(f"{t.name}.__getitem__", t.bound, t.bound_kw)]),
+                                  [slc], None, {}, None, site)
+                continue
             rest.add(t)
         return out | self.state.deref(frozenset(rest))
 
@@ -1101,8 +1116,10 @@ class Interp:
         return self.state.deref(self.eval(e.value))
 
     def e_Await(self, e: ast.Await) -> Vals:
-        """Evaluate `await x` as the value of `x`; awaiting is not modelled."""
-        return self.eval(e.value)
+        """Evaluate `await x`: call `__await__` if defined, otherwise return `x` itself."""
+        v = self.eval(e.value)
+        found, out = self.invoke_dunder(v, "__await__", [], make_site(self.info.id, e, "op"))
+        return out if found else v
 
     def _has_instance_attr(self, inst: Instance, attr: str) -> bool:
         """Return True if `attr` may exist on `inst` without calling `__getattr__`.
@@ -1135,8 +1152,12 @@ class Interp:
         out: set[Token] = set()
         site = make_site(self.info.id, e, "attr")
         for t in v:
-            if isinstance(t, Builtin) and f"{t.name}.{e.attr}" in STUBS:
-                out.add(Builtin(f"{t.name}.{e.attr}"))
+            if isinstance(t, Builtin):
+                full = f"{t.name}.{e.attr}"
+                if full in STUBS or full in STUB_MODULES or full in STUB_PACKAGES:
+                    out.add(Builtin(full, t.bound, t.bound_kw))
+                elif t.name == "builtins" and e.attr in BUILTIN_NAMES:
+                    out.add(Builtin(e.attr))
             elif isinstance(t, Module):
                 out.update(self.module_attr(t.name, e.attr))
             elif isinstance(t, Property):
@@ -1736,9 +1757,9 @@ class Interp:
             if a.name in self.prog.modules:
                 self.run_module(a.name)
                 self.bind(a.asname or top, frozenset([Module(a.name if a.asname else top)]))
-            elif a.asname and a.name in STUB_MODULES:
+            elif a.asname and (a.name in STUB_MODULES or a.name in STUB_PACKAGES):
                 self.bind(a.asname, frozenset([Builtin(a.name)]))
-            elif not a.asname and top in STUB_MODULES:
+            elif not a.asname and (a.name in STUB_MODULES or top in STUB_MODULES or top in STUB_PACKAGES):
                 self.bind(top, frozenset([Builtin(top)]))
 
     def s_ImportFrom(self, s: ast.ImportFrom) -> None:
@@ -1760,12 +1781,24 @@ class Interp:
                         self.run_module(f"{base}.{n}")
                     self.bind(n if star else a.asname or n, self.module_attr(base, n))
             return
-        if s.level or s.module not in STUB_MODULES:
+        if s.level or (s.module not in STUB_MODULES and s.module not in STUB_PACKAGES):
             return
         for a in s.names:
+            if a.name == "*":
+                if s.module == "builtins":
+                    for n in BUILTIN_NAMES:
+                        self.bind(n, frozenset([Builtin(n)]))
+                else:
+                    prefix = f"{s.module}."
+                    for full in STUBS:
+                        if full.startswith(prefix) and "." not in full[len(prefix):]:
+                            self.bind(full[len(prefix):], frozenset([Builtin(full)]))
+                continue
             full = f"{s.module}.{a.name}"
-            if full in STUBS:
+            if full in STUBS or full in STUB_MODULES or full in STUB_PACKAGES:
                 self.bind(a.asname or a.name, frozenset([Builtin(full)]))
+            elif s.module == "builtins" and a.name in BUILTIN_NAMES:
+                self.bind(a.asname or a.name, frozenset([Builtin(a.name)]))
 
     def run(self) -> None:
         """Run the function's body: a lambda's expression becomes its return value."""
