@@ -139,6 +139,7 @@ contexts.
 | `extern` | `FuncId -> Env` | writes from other scopes: `global` and `nonlocal`, and `module.attr = v` into a module body |
 | `writes` | `Node -> (FuncId -> Env)` | per-node `global`, `nonlocal` and module-attribute writes (direct and transitive), applied back at call sites in flow mode |
 | `bases`, `metaclasses` | `ClassId -> ...` | direct user bases and metaclasses (`State.mro` computes and caches the MRO) |
+| `unknown_decos` | `set[tuple[Node, Site]]` | decorator sites confirmed unresolved after fixpoint convergence, treated as identity |
 | `changed` | `bool` | set by any write that grew something during the current round |
 
 Writes go through joining helpers, all of which set `changed`: `register`, `resolve`,

@@ -23,15 +23,7 @@ def test_solve_is_idempotent(path: Path) -> None:
     assert not step(prog, s1.copy()).changed  # s1 is already a fixpoint
 
 
-# Context choice is not monotone in argument values, so a transient empty argument
-# (callee return not yet known) can hit a seeded unreachable context and leave a
-# spurious value behind. The result then depends on iteration order.
-ORDER_DEPENDENT = {"19_decorators"}
-
-
-@pytest.mark.parametrize("path", [
-    pytest.param(p, marks=pytest.mark.xfail(strict=True, reason="order-dependent fixpoint"))
-    if p.stem in ORDER_DEPENDENT else p for p in CASES], ids=lambda p: p.stem)
+@pytest.mark.parametrize("path", CASES, ids=lambda p: p.stem)
 def test_chained_passes_match_single_pass(path: Path) -> None:
     prog = parse_file(path)
     chained = solve(prog, solve(prog), include_unreachable=True)

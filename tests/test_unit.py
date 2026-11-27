@@ -338,3 +338,131 @@ def test_global_rebinding_flow_sensitive_per_site() -> None:
     sites = _site_targets(cg, "<module>")
     assert sites[8] == {"a"}
     assert sites[10] == {"b"}
+
+
+def test_decorator_factory_direct_and_indirect_no_spurious_edge() -> None:
+    cg = graph("""
+        def make_deco(n):
+            def deco(fn):
+                def wrapper():
+                    return fn()
+                return wrapper
+            return deco
+
+        class Holder:
+            def get_deco(self):
+                return make_deco(1)
+
+        @make_deco(2)
+        def direct():
+            return 1
+
+        d = make_deco(3)
+        @d
+        def indirect():
+            return 2
+
+        h = Holder()
+        @h.get_deco()
+        def via_attr():
+            return 3
+
+        direct()
+        indirect()
+        via_attr()
+    """)
+    edges = cg.function_edges()
+    assert ("<module>", "direct") not in edges
+    assert ("<module>", "indirect") not in edges
+    assert ("<module>", "via_attr") not in edges
+    assert {("make_deco.deco.wrapper", "direct"),
+            ("make_deco.deco.wrapper", "indirect"),
+            ("make_deco.deco.wrapper", "via_attr")} <= edges
+
+
+def test_unknown_decorator_falls_back_to_identity_after_convergence() -> None:
+    cg = graph("""
+        from thirdparty import ext_deco, ext_factory
+
+        def make_deco():
+            def deco(fn):
+                def wrapper():
+                    return fn()
+                return wrapper
+            return deco
+
+        @ext_deco
+        def plain():
+            return 1
+
+        @ext_factory(1)
+        def factory_wrapped():
+            return 2
+
+        @ext_deco
+        @make_deco()
+        def stacked():
+            return 3
+
+        @ext_deco
+        class C:
+            def m(self):
+                return 4
+
+        plain()
+        factory_wrapped()
+        stacked()
+        C().m()
+    """)
+    edges = cg.function_edges()
+    assert {("<module>", "plain"), ("<module>", "factory_wrapped"),
+            ("<module>", "make_deco.deco.wrapper"), ("make_deco.deco.wrapper", "stacked"),
+            ("<module>", "C.m")} <= edges
+    assert ("<module>", "stacked") not in edges
+
+
+def test_unknown_decorator_is_context_sensitive_and_persists() -> None:
+    import json
+    from callme.extract import build_program
+    from callme.persist import state_from_dict, state_to_dict
+    from callme.solver import init_state, solve, step
+
+    src = textwrap.dedent("""\
+        from thirdparty import ext_deco
+
+        def wrap(fn):
+            def inner():
+                return fn()
+            return inner
+
+        def make(deco):
+            @deco
+            def target():
+                return 1
+            return target
+
+        f1 = make(wrap)
+        f2 = make(ext_deco)
+        f1()
+        f2()
+    """)
+    cg = analyze_source(src, id_style="short")
+    sites = _site_targets(cg, "<module>")
+    assert sites[16] == {"wrap.inner"}
+    assert sites[17] == {"make.target"}
+
+    prog = build_program(src, "t.py")
+    s_solve = solve(prog)
+    s_manual = init_state(prog)
+    for _ in range(100):
+        if not step(prog, s_manual).changed:
+            break
+    assert s_manual.same_result(s_solve)
+
+    back = state_from_dict(prog, json.loads(json.dumps(state_to_dict(s_solve))))
+    assert back.same_result(s_solve)
+    assert solve(prog, back).same_result(s_solve)
+
+    chained = solve(prog, s_solve, include_unreachable=True)
+    direct = solve(prog, include_unreachable=True)
+    assert chained.same_result(direct)

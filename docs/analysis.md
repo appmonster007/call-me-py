@@ -63,8 +63,11 @@ make(double)(2)
 3. **Calls during a round.** A call with a new entry state registers a new node
    (`State.resolve`). The call evaluates to whatever `State.ret` holds for the callee so far,
    which is nothing on the first visit, so later rounds refine it.
-4. **Stopping.** Solving ends after a round in which nothing changed (`State.changed`). After
-   `max_rounds` rounds (10 000) it raises `RuntimeError` instead.
+4. **Stopping.** Solving ends after a round in which nothing changed (`State.changed`). When a
+   round makes no other changes, any decorator expression that still evaluated to `EMPTY` is
+   confirmed unresolved in `State.unknown_decos`, so a final wave treats it as the identity
+   without leaking spurious round-1 bindings for decorator factories whose return value had not
+   converged yet. After `max_rounds` rounds (10 000) it raises `RuntimeError` instead.
 
 Values only grow and the abstract domain is finite (§4), so the loop terminates.
 
@@ -320,6 +323,6 @@ module's `work`.
 - **Coroutines and generators.** `await e` calls `__await__` if defined and otherwise has the
   value of `e`; a generator's `yield` values are added to its return value. Calling an `async def`
   runs its body immediately rather than deferring it to an event loop.
-- **Order dependence.** Context choice depends on argument values that may still be growing,
-  so in rare cases the fixpoint depends on the order of iteration. `ORDER_DEPENDENT` in
-  `tests/test_multipass.py` lists them, for example `hof/19_decorators`.
+- **Order dependence.** Context widening depends on the order in which contexts arrive, so
+  under tight `--max-contexts` bounds (such as `1`) the fixpoint can depend on iteration order.
+  `WIDEN_ORDER_DEPENDENT` in `tests/test_multipass.py` lists the affected cases.

@@ -43,7 +43,7 @@ from .model import (
 from .pipeline import Facts, PassState
 from .transfer import Env, State
 
-FORMAT, VERSION = "callme-state", 5  # v3: flow_sensitive; v4: module tokens; v5: per-node writes
+FORMAT, VERSION = "callme-state", 5  # v3: flow_sensitive; v4: module tokens; v5: writes, unknown_decos
 
 Path = str | os.PathLike[str]
 
@@ -98,6 +98,7 @@ class StateDoc(TypedDict):
     writes: list[tuple[int, list[tuple[str, EnvDoc]]]]
     bases: list[tuple[str, list[str]]]
     metaclasses: list[tuple[str, list[str]]]
+    unknown_decos: list[tuple[int, SiteRow]]  # node, decorator site
 
 
 class FactsDoc(TypedDict):
@@ -217,7 +218,8 @@ def state_to_dict(state: State) -> StateDoc:
                        for n, ws in state.writes.items()],
             "bases": [(c.uid, [b.uid for b in bs]) for c, bs in state.bases.items()],
             "metaclasses": [(c.uid, sorted(m.uid for m in ms))
-                            for c, ms in state.metaclasses.items()]}
+                            for c, ms in state.metaclasses.items()],
+            "unknown_decos": sorted((enc.node(n), _site(s)) for n, s in state.unknown_decos)}
 
 
 def state_from_dict(prog: Program, d: object) -> State:
@@ -338,6 +340,8 @@ def state_from_dict(prog: Program, d: object) -> State:
     state.writes = {get(i, Node): {func(f): env(e) for f, e in ws} for i, ws in doc["writes"]}
     state.bases = {cls(c): tuple(cls(b) for b in bs) for c, bs in doc["bases"]}
     state.metaclasses = {cls(c): {cls(m) for m in ms} for c, ms in doc["metaclasses"]}
+    state.unknown_decos = {(get(n, Node), Site(func(uid), line, col, text, kind))
+                           for n, (uid, line, col, text, kind) in doc["unknown_decos"]}
     state.changed = False
     return state
 

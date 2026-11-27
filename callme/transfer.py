@@ -124,6 +124,8 @@ class State:
     writes: dict[Node, Writes]  # per-node global / nonlocal / module-attr writes (incl. callees)
     bases: dict[ClassId, tuple[ClassId, ...]]  # direct user base classes per class
     metaclasses: dict[ClassId, set[ClassId]]  # direct user metaclass(es) per class
+    unknown_decos: set[tuple[Node, Site]]  # decorator sites confirmed unresolved -> identity
+    _pending_decos: set[tuple[Node, Site]]  # transient: empty decorator sites seen in current round
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
@@ -150,6 +152,8 @@ class State:
         self.writes = {}
         self.bases = {}
         self.metaclasses = {}
+        self.unknown_decos = set()
+        self._pending_decos = set()
         self._mro_cache = {}
         self.changed = False
 
@@ -169,6 +173,7 @@ class State:
         new.writes = {n: {f: dict(e) for f, e in ws.items()} for n, ws in self.writes.items()}
         new.bases = dict(self.bases)
         new.metaclasses = {c: set(m) for c, m in self.metaclasses.items()}
+        new.unknown_decos = set(self.unknown_decos)
         return new
 
     def same_result(self, other: State) -> bool:
@@ -178,7 +183,8 @@ class State:
                 and self.entry == other.entry and self.class_attrs == other.class_attrs
                 and self.inst_attrs == other.inst_attrs and self.heap == other.heap
                 and self.extern == other.extern and self.writes == other.writes
-                and self.bases == other.bases and self.metaclasses == other.metaclasses)
+                and self.bases == other.bases and self.metaclasses == other.metaclasses
+                and self.unknown_decos == other.unknown_decos)
 
     def add_class_attr(self, cls: ClassId, name: str, vals: Vals) -> None:
         """Join `vals` into attribute `name` of class `cls`, setting `changed` if it grew."""
@@ -475,6 +481,7 @@ class Interp:
     live: bool  # flow mode: False after return / raise / break / continue (until a live path joins)
     loops: list[_LoopFrame]  # enclosing loops, innermost last
     tries: list[Env]  # enclosing try / with bodies: union of every state seen inside (may raise)
+    empty_decos: set[Site]  # decorator sites that evaluated to EMPTY in this run
     _weak_depth: int  # > 0 inside conditional expressions, stubs, or implicit calls: no strong kills
 
     def __init__(self, prog: Program, state: State, node: Node | None, *,
@@ -499,6 +506,7 @@ class Interp:
         self.live = True
         self.loops = []
         self.tries = []
+        self.empty_decos = set()
         self._weak_depth = 0
 
     # ------------------------------------------------------------ names
@@ -1650,22 +1658,37 @@ class Interp:
 
     s_TryStar = s_Try
 
+    def _apply_decorator(self, dec: ast.expr, callee: Vals, vals: Vals) -> Vals:
+        """Apply decorator `dec` with evaluated value `callee` to `vals` and return the result.
+
+        When `callee` is non-empty, it is called at the decorator site. When `callee` is empty,
+        it is treated as the identity only if `(self.node, site)` has already been confirmed
+        unresolved in `State.unknown_decos`; otherwise `site` is recorded in `empty_decos` and
+        `EMPTY` is returned so that decorator factories whose return value has not converged yet
+        do not leak spurious identity bindings on early rounds.
+        """
+        site = make_site(self.info.id, dec, "decorator")
+        if callee:
+            self.empty_decos.discard(site)
+            return self.apply(callee, [vals], None, {}, None, site)
+        if self.node is not None and (self.node, site) in self.state.unknown_decos:
+            return vals  # confirmed unresolved decorator: assume identity
+        self.empty_decos.add(site)
+        return EMPTY
+
     def s_FunctionDef(self, s: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         """Run a def: evaluate its defaults, create its closure, apply its decorators, bind it.
 
         Decorators are applied from the bottom one up, each at its own decorator site. A
-        decorator whose value is unknown is assumed to be the identity, so the function keeps
-        its own value.
+        decorator that remains unresolved after the fixpoint converges is assumed to be the
+        identity, so the function keeps its own value (`_apply_decorator`).
         """
         fid = self.prog.by_node[id(s)]
         for d in [*s.args.defaults, *[k for k in s.args.kw_defaults if k is not None]]:
             self.eval(d)
-        vals = frozenset([mk_closure(fid, self.node)])
+        vals: Vals = frozenset([mk_closure(fid, self.node)])
         for dec in reversed(s.decorator_list):
-            callee = self.eval(dec)
-            res = self.apply(callee, [vals], None, {}, None,
-                             make_site(self.info.id, dec, "decorator"))
-            vals = res if callee else vals  # unresolved decorator: assume identity
+            vals = self._apply_decorator(dec, self.eval(dec), vals)
         self.bind(s.name, vals)
 
     s_AsyncFunctionDef = s_FunctionDef
@@ -1734,9 +1757,7 @@ class Interp:
 
         vals: Vals = frozenset([cls_obj])
         for dec, callee in reversed(list(zip(s.decorator_list, decs))):
-            res = self.apply(callee, [vals], None, {}, None,
-                             make_site(self.info.id, dec, "decorator"))
-            vals = res if callee else vals  # unresolved decorator: assume identity
+            vals = self._apply_decorator(dec, callee, vals)
         self.bind(s.name, vals)
 
     def s_Match(self, s: ast.Match) -> None:
@@ -2031,6 +2052,9 @@ def analyze(node: Node, state: State, prog: Program,
     if state.flow:  # callee writes are applied at call sites; `known` only joins the summary
         it.summary = join_envs([it.env, state.extern.get(node.func, {}), known])
         it.run()
+        for site in it.empty_decos:
+            if (node, site) not in state.unknown_decos:
+                state._pending_decos.add((node, site))
         return it.summary, it.ret, it.calls
     for name, vals in state.extern.get(node.func, {}).items():  # global / nonlocal writes
         it.env[name] = it.env.get(name, EMPTY) | vals
@@ -2038,7 +2062,10 @@ def analyze(node: Node, state: State, prog: Program,
         it.env[name] = it.env.get(name, EMPTY) | vals
     while True:
         snapshot = dict(it.env)
-        it.ret, it.calls = EMPTY, []
+        it.ret, it.calls, it.empty_decos = EMPTY, [], set()
         it.run()
         if it.env == snapshot:
+            for site in it.empty_decos:
+                if (node, site) not in state.unknown_decos:
+                    state._pending_decos.add((node, site))
             return it.env, it.ret, it.calls

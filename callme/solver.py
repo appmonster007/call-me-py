@@ -68,9 +68,12 @@ def step(prog: Program, state: State) -> State:
 
     Each node's environment, return value and call edges are joined into the state.
     `state.changed` is True afterwards if anything grew, including the contexts and tables
-    that `analyze` writes directly. Return `state`.
+    that `analyze` writes directly. When a round makes no other changes, any decorator sites
+    that still evaluated to `EMPTY` are confirmed unresolved in `state.unknown_decos` (so the
+    next round treats them as the identity) and `state.changed` is set to True. Return `state`.
     """
     state.changed = False
+    state._pending_decos.clear()
     for node in list(state.order):
         env, ret, calls = analyze(node, state, prog)
         old_env = state.envs.get(node, {})
@@ -89,6 +92,12 @@ def step(prog: Program, state: State) -> State:
             if edge not in state.edges:
                 state.edges.add(edge)
                 state.changed = True
+    if not state.changed and state._pending_decos:
+        new_unknown = state._pending_decos - state.unknown_decos
+        if new_unknown:
+            state.unknown_decos |= new_unknown
+            state.changed = True
+    state._pending_decos.clear()
     return state
 
 
