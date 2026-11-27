@@ -17,22 +17,27 @@ from .transfer import State
 
 def analyze_source(source: str, filename: str = "<string>", id_style: str = "full", *,
                    state: State | None = None, include_unreachable: bool = False,
-                   max_contexts: int | None = None, max_rounds: int = 10_000) -> CallGraph:
-    """Keyword options go to `solve` (max_contexts defaults to 16, or to `state`'s own).
-    The returned graph keeps its solver state in `.state` for a later pass."""
+                   max_contexts: int | None = None, flow_sensitive: bool | None = None,
+                   max_rounds: int = 10_000) -> CallGraph:
+    """Keyword options go to `solve` (max_contexts defaults to 16 and flow_sensitive
+    to True, or to `state`'s own). The returned graph keeps its solver state in
+    `.state` for a later pass."""
     prog = build_program(source, filename)
     state = solve(prog, state, include_unreachable=include_unreachable,
-                  max_contexts=max_contexts, max_rounds=max_rounds)
+                  max_contexts=max_contexts, flow_sensitive=flow_sensitive,
+                  max_rounds=max_rounds)
     return build_callgraph(prog, state, id_style)
 
 
 def analyze_file(path: str | os.PathLike[str], id_style: str = "full", *,
                  state: State | None = None, include_unreachable: bool = False,
-                 max_contexts: int | None = None, max_rounds: int = 10_000) -> CallGraph:
+                 max_contexts: int | None = None, flow_sensitive: bool | None = None,
+                 max_rounds: int = 10_000) -> CallGraph:
     """Like analyze_source; a `state` from an earlier run of the same, unchanged file can be resumed."""
     prog = parse_file(path)
     state = solve(prog, state, include_unreachable=include_unreachable,
-                  max_contexts=max_contexts, max_rounds=max_rounds)
+                  max_contexts=max_contexts, flow_sensitive=flow_sensitive,
+                  max_rounds=max_rounds)
     return build_callgraph(prog, state, id_style)
 
 

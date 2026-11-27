@@ -1,5 +1,5 @@
 """python -m callme FILE -o OUT [--format json|dot|icfg] [--contexts] [--returns] [--icfg]
-                    [--load-state S] [--save-state S]
+                    [--flow-insensitive] [--load-state S] [--save-state S]
 
 Multi-pass from the shell: --save-state keeps the solver state, --load-state resumes it
 (only for the same, unchanged FILE), e.g. a second run with --include-unreachable."""
@@ -42,13 +42,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="print the intermediate graph (nesting + call-site edges, source -> target) to stderr")
     ap.add_argument("--max-contexts", type=int, default=None,
                     help="context budget per function (default 16, or the loaded state's)")
+    ap.add_argument("--flow-insensitive", dest="flow_sensitive", action="store_const",
+                    const=False, default=None,
+                    help="treat each local as the union of all its bindings (less precise;"
+                         " default: flow-sensitive, or the loaded state's mode)")
     ap.add_argument("--load-state", metavar="PATH", help="resume from a state saved for this file")
     ap.add_argument("--save-state", metavar="PATH", help="save the solver state after this pass")
     ap.add_argument("-o", "--output", help="write the graph here; without it nothing is printed")
     a = ap.parse_args(argv)
     state = load_state(parse_file(a.file), a.load_state) if a.load_state else None
     cg = analyze_file(a.file, id_style=a.id_style, include_unreachable=a.include_unreachable,
-                      max_contexts=a.max_contexts, state=state)
+                      max_contexts=a.max_contexts, flow_sensitive=a.flow_sensitive, state=state)
     if a.save_state:
         save_state(cg.state, a.save_state)
     if a.print_graph:

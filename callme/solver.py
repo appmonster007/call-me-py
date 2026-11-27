@@ -24,16 +24,19 @@ DEFAULT_MAX_CONTEXTS = 16
 
 
 def init_state(prog: Program, state: State | None = None, *,
-               include_unreachable: bool = False, max_contexts: int | None = None) -> State:
+               include_unreachable: bool = False, max_contexts: int | None = None,
+               flow_sensitive: bool | None = None) -> State:
     """Validate/create a state for `prog` and register its root nodes (idempotent)."""
     if state is None:
         state = State(DEFAULT_MAX_CONTEXTS if max_contexts is None else max_contexts,
-                      prog.fingerprint)
+                      prog.fingerprint, True if flow_sensitive is None else flow_sensitive)
     else:
         if state.program is not None and state.program != prog.fingerprint:
             raise ValueError("state was produced for a different program (or another version of it)")
         if max_contexts is not None and max_contexts != state.max_ctx:
             raise ValueError(f"max_contexts={max_contexts} conflicts with state.max_ctx={state.max_ctx}")
+        if flow_sensitive is not None and flow_sensitive != state.flow:
+            raise ValueError(f"flow_sensitive={flow_sensitive} conflicts with state.flow={state.flow}")
         state.program = prog.fingerprint
     mod = Node(prog.module, Ctx())
     state.register(mod)
@@ -74,29 +77,33 @@ class CallGraphPass:
 
     include_unreachable: bool = False
     max_contexts: int | None = None
+    flow_sensitive: bool | None = None  # None: True for a fresh state, else the state's own
     name: str = "callgraph"
 
     def init(self, prog: Program, _facts: Facts, state: PassState | None) -> State:
         if state is not None and not isinstance(state, State):
             raise TypeError(f"{self.name} state must be a State, not a {type(state).__name__}")
         return init_state(prog, state, include_unreachable=self.include_unreachable,
-                          max_contexts=self.max_contexts)
+                          max_contexts=self.max_contexts, flow_sensitive=self.flow_sensitive)
 
     def step(self, prog: Program, facts: Facts) -> bool:
         return step(prog, facts.get(self.name, State)).changed
 
 
 def solve(prog: Program, state: State | None = None, *, include_unreachable: bool = False,
-          max_contexts: int | None = None, max_rounds: int = 10_000,
-          inplace: bool = False,
+          max_contexts: int | None = None, flow_sensitive: bool | None = None,
+          max_rounds: int = 10_000, inplace: bool = False,
           on_round: Callable[[int, State], None] | None = None) -> State:
     """Run the call graph pass to a fixpoint, starting from `state` (or an empty one).
 
     The input state is copied unless `inplace=True`. max_contexts defaults to 16
-    for a fresh state and to the state's own value when one is given.
+    and flow_sensitive to True for a fresh state; both default to the state's own
+    value when one is given (a different value raises ValueError).
+    `flow_sensitive=False` treats each local as the union of all its bindings
+    (see transfer.py): cheaper to reason about, less precise.
     `on_round(round, state)` (optional) is called after each round, e.g. to record a trace.
     """
-    p = CallGraphPass(include_unreachable, max_contexts)
+    p = CallGraphPass(include_unreachable, max_contexts, flow_sensitive)
     facts = Facts(prog.fingerprint, {p.name: state} if state is not None else None)
     hook: Callable[[int, Facts], None] | None = None if on_round is None else (
         lambda rnd, f: on_round(rnd, f.get(p.name, State)))

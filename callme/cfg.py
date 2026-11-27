@@ -20,7 +20,7 @@ leaving a `try ... finally` run the finally block first. Implicit exceptions
 outside any `try` are not modelled.
 
 Every statement gets a node even when unreachable (dead code), because the call
-graph analysis is flow insensitive and still reports call sites in dead code.
+graph analysis still reports call sites in dead code (see transfer.Interp.block).
 """
 from __future__ import annotations
 

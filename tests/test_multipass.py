@@ -72,6 +72,14 @@ def test_conflicting_max_contexts_rejected() -> None:
         solve(prog, solve(prog, max_contexts=4), max_contexts=8)
 
 
+def test_conflicting_flow_sensitivity_rejected() -> None:
+    prog = build_program("def f(): pass\n", "t.py")
+    fi = solve(prog, flow_sensitive=False)
+    assert not solve(prog, fi).flow  # a resumed state keeps its mode
+    with pytest.raises(ValueError):
+        solve(prog, fi, flow_sensitive=True)
+
+
 # ------------------------------------------------------------ program identity
 from callme import CallGraphPass, analyze_file, run_passes
 from callme.__main__ import main as cli
@@ -148,8 +156,9 @@ def test_manual_step_loop_equals_solve(path: Path) -> None:
 
 
 def test_analyze_joins_explicit_env() -> None:
+    """Flow-insensitive: a seeded env is part of the starting union, so every read sees it."""
     prog = build_program("def a(): pass\ndef b(): pass\nx = a\nx()\n", "t.py")
-    s = solve(prog)
+    s = solve(prog, flow_sensitive=False)
     mod = s.order[0]
     a_tok = next(iter(s.envs[mod]["x"]))
     b_tok = next(iter(s.envs[mod]["b"]))
@@ -158,6 +167,21 @@ def test_analyze_joins_explicit_env() -> None:
     env, _, calls = analyze(mod, s.copy(), prog, {"x": frozenset([b_tok])})
     assert env["x"] >= {a_tok, b_tok}  # seeded value is joined, not replaced
     assert {callee.func.qualname for _, callee in calls} == {"a", "b"}
+
+
+def test_flow_analyze_joins_explicit_env_into_summary_only() -> None:
+    """Flow-sensitive: a seeded env joins the returned summary, but `x = a` still
+    replaces x before the call, so the seed cannot add a callee."""
+    prog = build_program("def a(): pass\ndef b(): pass\nx = a\nx()\n", "t.py")
+    s = solve(prog)
+    mod = s.order[0]
+    a_tok = next(iter(s.envs[mod]["x"]))
+    b_tok = next(iter(s.envs[mod]["b"]))
+    default = analyze(mod, s.copy(), prog)
+    assert analyze(mod, s.copy(), prog, s.envs[mod]) == default
+    env, _, calls = analyze(mod, s.copy(), prog, {"x": frozenset([b_tok])})
+    assert env["x"] >= {a_tok, b_tok}
+    assert {callee.func.qualname for _, callee in calls} == {"a"}
 
 
 def test_analyze_only_registers_contexts() -> None:
@@ -244,10 +268,11 @@ def test_icfg_from_state_matches_callgraph_icfg() -> None:
 @pytest.mark.parametrize("path", CASES, ids=lambda p: p.stem)
 def test_state_roundtrip(path: Path) -> None:
     prog = parse_file(path)
-    for s in (solve(prog), solve(prog, include_unreachable=True), solve(prog, max_contexts=1)):
+    for s in (solve(prog), solve(prog, include_unreachable=True), solve(prog, max_contexts=1),
+              solve(prog, flow_sensitive=False)):
         d = json.loads(json.dumps(state_to_dict(s)))
         back = state_from_dict(parse_file(path), d)
-        assert back.same_result(s) and back.max_ctx == s.max_ctx
+        assert back.same_result(s) and back.max_ctx == s.max_ctx and back.flow == s.flow
         assert solve(prog, back).same_result(s)  # resumable
 
 

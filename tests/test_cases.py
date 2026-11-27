@@ -16,7 +16,7 @@ EDGE = re.compile(r"^\s+(\S+) -> (\S+)$", re.M)
 
 # Cases inside the supported core: defs, lambdas, closures, defaults, *args/**kwargs,
 # function arguments/returns, comprehensions, shadowing, decorators, HOF recursion.
-CORE = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "12", "13", "25", "26", "27"]
+CORE = ["01", "02", "03", "04", "05", "06", "07", "08", "09", "12", "13", "25", "26", "27", "49"]
 
 
 def section(src: str, name: str) -> set[tuple[str, str]]:

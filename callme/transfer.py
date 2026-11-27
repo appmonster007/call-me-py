@@ -9,6 +9,19 @@ Calls are context sensitive, with the callee's abstract entry state as context:
 
   entering  {param_i -> eval(arg_i)} becomes the callee's context
   returning the call evaluates to the callee's return value for that context
+
+Flow sensitivity (`State.flow`, the default): a body is interpreted once, in
+program order. Assigning a local replaces its value (strong update); branches
+run on copies of the env and are joined where they meet again; a loop repeats
+its body until the env at its head stops growing; `break` / `continue` /
+`return` / `raise` end their path. Everything other scopes read from a node
+(closures, default arguments, the docs) is its *summary*: the union of every
+value each local takes anywhere in the body, stored in `State.envs`. Locals
+written from inner scopes (`global` / `nonlocal`) stay flow-insensitive: any
+call may write them, so a read sees the local value joined with those writes.
+
+With `flow=False` a local is the union of all its bindings (weak updates) and
+the body is re-run until that union stops changing.
 """
 from __future__ import annotations
 
@@ -45,6 +58,7 @@ from .stubs import BUILTIN_NAMES, METHOD_STUBS, STUB_MODULES, STUBS, Args
 
 Env = dict[str, Vals]
 Calls = list[tuple[Site, Node]]
+End = tuple[Env, bool]  # flow mode: env where a path ends, and whether a live path gets there
 
 __all__ = ["EMPTY", "Vals", "Env", "State", "Interp", "analyze"]
 MAX_DEPTH = 3  # nesting of captured contexts before widening to "unknown parent"
@@ -88,6 +102,7 @@ class State:
 
     max_ctx: int
     program: str | None  # Program.fingerprint of the source this state describes
+    flow: bool  # flow-sensitive locals (strong updates, joins); False = one union per local
     order: list[Node]
     by_func: dict[FuncId, set[Node]]
     envs: dict[Node, Env]
@@ -103,9 +118,10 @@ class State:
     _mro_cache: dict[ClassId, tuple[ClassId, ...]]
     changed: bool
 
-    def __init__(self, max_ctx: int = 16, program: str | None = None) -> None:
+    def __init__(self, max_ctx: int = 16, program: str | None = None, flow: bool = True) -> None:
         self.max_ctx = max_ctx
         self.program = program
+        self.flow = flow
         self.order = []
         self.by_func = {}
         self.envs = {}
@@ -123,7 +139,7 @@ class State:
 
     def copy(self) -> State:
         """Independent copy (values are immutable, containers are not)."""
-        new = State(self.max_ctx, self.program)
+        new = State(self.max_ctx, self.program, self.flow)
         new.order = list(self.order)
         new.by_func = {f: set(g) for f, g in self.by_func.items()}
         new.envs = {n: dict(e) for n, e in self.envs.items()}
@@ -310,6 +326,24 @@ class State:
         return out
 
 
+def join_envs(envs: Iterable[Env]) -> Env:
+    """Pointwise union of environments (the join where control-flow paths meet)."""
+    out: Env = {}
+    for env in envs:
+        for k, v in env.items():
+            out[k] = out.get(k, EMPTY) | v
+    return out
+
+
+@final
+class _LoopFrame:
+    """Environments leaving one loop early: at each `break` and each `continue`."""
+
+    def __init__(self) -> None:
+        self.breaks: list[Env] = []
+        self.continues: list[Env] = []
+
+
 def mk_closure(func: FuncId, node: Node | None) -> Closure:
     if node is None:
         return Closure(func, None)
@@ -339,10 +373,15 @@ class Interp:
     node: Node | None
     readonly: bool
     info: FuncInfo
-    env: Env
+    env: Env  # flow mode: the locals at the current program point
     ret: Vals
     calls: Calls
     class_stack: list[tuple[ClassId, Env]]
+    flow: bool
+    summary: Env  # flow mode: every value each local takes anywhere (what State.envs stores)
+    live: bool  # flow mode: False after return / raise / break / continue (until a live path joins)
+    loops: list[_LoopFrame]  # enclosing loops, innermost last
+    tries: list[Env]  # enclosing try / with bodies: union of every state seen inside (may raise)
 
     def __init__(self, prog: Program, state: State, node: Node | None, *,
                  readonly: bool = False, func: FuncId | None = None) -> None:
@@ -354,9 +393,15 @@ class Interp:
         self.ret = EMPTY
         self.calls = []
         self.class_stack = []
+        self.flow = state.flow
+        self.summary = {}
+        self.live = True
+        self.loops = []
+        self.tries = []
 
     # ------------------------------------------------------------ names
-    def bind(self, name: str, vals: Vals) -> None:
+    def bind(self, name: str, vals: Vals, *, weak: bool = False) -> None:
+        """Bind `name` in the current scope. Flow mode replaces a local's value unless `weak`."""
         if self.class_stack:
             if name == "__new__":
                 vals = frozenset(StaticMethod(t) if isinstance(t, Closure) else t for t in vals)
@@ -366,8 +411,17 @@ class Interp:
             ns[name] = ns.get(name, EMPTY) | vals
             if not self.readonly:
                 self.state.add_class_attr(cid, name, vals)
-        elif vals and name in self.info.locals:
-            self.env[name] = self.env.get(name, EMPTY) | vals
+        elif name in self.info.locals:
+            if self.flow and not weak:  # strong update: this binding replaces the old one
+                if vals:
+                    self.env[name] = vals
+                else:
+                    self.env.pop(name, None)
+            elif vals:
+                self.env[name] = self.env.get(name, EMPTY) | vals
+            if self.flow and vals:
+                for acc in (self.summary, *self.tries):
+                    acc[name] = acc.get(name, EMPTY) | vals
         elif vals and not self.readonly and name in self.info.globals:
             self.state.add_extern(self.prog.module, name, vals)
         elif vals and not self.readonly and name in self.info.nonlocals:
@@ -388,9 +442,11 @@ class Interp:
         if self.class_stack and name in self.class_stack[-1][1]:
             return self.class_stack[-1][1][name]
         if name in self.info.locals:
-            if self.node is not None:
-                return self.env.get(name, EMPTY)
-            return self.state.union_env(self.info.id, name)
+            if self.node is None:
+                return self.state.union_env(self.info.id, name)
+            if self.flow:  # inner scopes may have written it (global / nonlocal) during any call
+                return self.env.get(name, EMPTY) | self.state.extern.get(self.info.id, {}).get(name, EMPTY)
+            return self.env.get(name, EMPTY)
         parent_node = self.node.ctx.parent if self.node is not None else None
         f = self.info.parent
         while f is not None:  # lexical chain: closures, then module
@@ -729,7 +785,10 @@ class Interp:
 
     def e_NamedExpr(self, e: ast.NamedExpr) -> Vals:
         v = self.eval(e.value)
-        self.assign(e.target, v)
+        if isinstance(e.target, ast.Name):  # weak: the walrus may sit in a branch that does not run
+            self.bind(e.target.id, v, weak=True)
+        else:
+            self.assign(e.target, v)
         return v
 
     def _union(self, elts: Iterable[ast.expr]) -> Vals:
@@ -951,15 +1010,33 @@ class Interp:
 
     e_YieldFrom = e_Yield
 
-    def _comp(self, gens: list[ast.comprehension]) -> None:
+    def _comp(self, gens: list[ast.comprehension]) -> dict[str, Vals | None]:
+        """Bind the comprehension's targets; returns their outer values for `_end_comp`."""
+        saved: dict[str, Vals | None] = {}
+        if self.flow:
+            for g in gens:
+                for n in ast.walk(g.target):
+                    if isinstance(n, ast.Name):
+                        saved.setdefault(n.id, self.env.get(n.id))
         for g in gens:
             self.assign(g.target, self._iter_expr(g.iter, is_async=bool(g.is_async)))
             for c in g.ifs:
                 self.eval(c)
+        return saved
+
+    def _end_comp(self, saved: dict[str, Vals | None]) -> None:
+        """Comprehension variables live in their own scope: restore the outer values."""
+        for name, vals in saved.items():
+            if vals is None:
+                self.env.pop(name, None)
+            else:
+                self.env[name] = vals
 
     def e_GeneratorExp(self, e: ast.ListComp | ast.SetComp | ast.GeneratorExp) -> Vals:
-        self._comp(e.generators)
-        return self.eval(e.elt)
+        saved = self._comp(e.generators)
+        out = self.eval(e.elt)
+        self._end_comp(saved)
+        return out
 
     def e_ListComp(self, e: ast.ListComp) -> Vals:
         return self.e_GeneratorExp(e) | self.new_box("list", e)
@@ -968,18 +1045,26 @@ class Interp:
         return self.e_GeneratorExp(e) | self.new_box("set", e)
 
     def e_DictComp(self, e: ast.DictComp) -> Vals:
-        self._comp(e.generators)
+        saved = self._comp(e.generators)
         self.eval(e.key)
-        return self.eval(e.value) | self.new_box("dict", e)
+        out = self.eval(e.value)
+        self._end_comp(saved)
+        return out | self.new_box("dict", e)
 
     # ------------------------------------------------------------ statements
     def block(self, stmts: Iterable[ast.AST]) -> None:
+        reached = True
         for s in stmts:
+            if not self.live:  # flow mode: dead code after a jump is still analysed (its call
+                reached = False  # sites stay in the graph), from the env at the jump ...
+                self.live = True
             m: Callable[[ast.AST], None] | None = getattr(self, "s_" + type(s).__name__, None)
             if m:
                 m(s)
             else:
                 self.generic_stmt(s)
+        if not reached:  # ... but its state never reaches live code
+            self.live = False
 
     def generic_stmt(self, s: ast.AST) -> None:
         for c in ast.iter_child_nodes(s):
@@ -988,11 +1073,120 @@ class Interp:
             elif isinstance(c, ast.stmt):
                 self.block([c])
             elif isinstance(c, ast.ExceptHandler):
-                exc = self.eval(c.type)
-                if c.name:
-                    at = Alloc(self.info.id, c.lineno, c.col_offset)
-                    self.bind(c.name, frozenset(Instance(t.cls, at) for t in exc if isinstance(t, ClassObj)))
-                self.block(c.body)
+                self._handler(c)
+
+    def _handler(self, h: ast.ExceptHandler) -> None:
+        exc = self.eval(h.type)
+        if h.name:
+            at = Alloc(self.info.id, h.lineno, h.col_offset)
+            self.bind(h.name, frozenset(Instance(t.cls, at) for t in exc if isinstance(t, ClassObj)))
+        self.block(h.body)
+
+    # ------------------------------------------------------------ control flow (flow mode)
+    def _path(self, start: Env, stmts: Iterable[ast.AST]) -> End:
+        """Run `stmts` from a copy of `start`: (env at their end, whether a live path gets there)."""
+        self.env, self.live = dict(start), True
+        self.block(stmts)
+        return self.env, self.live
+
+    def _meet(self, ends: Sequence[End]) -> None:
+        """Continue after paths meet: from the join of the live ends. If none is live,
+        what follows is dead code, analysed from the join of all of them."""
+        live = [e for e, ok in ends if ok]
+        self.live = bool(live)
+        pick = live or [e for e, _ in ends]
+        self.env = dict(pick[0]) if len(pick) == 1 else join_envs(pick)
+
+    def s_If(self, s: ast.If) -> None:
+        if not self.flow:
+            return self.generic_stmt(s)
+        self.eval(s.test)
+        start = self.env
+        self._meet([self._path(start, s.body), self._path(start, s.orelse)])
+
+    def _loop(self, s: ast.While | ast.For | ast.AsyncFor, enter: Callable[[], object]) -> None:
+        """Run the body from the loop head until the head stops growing, then `else`.
+
+        `enter` is what happens at the head before each iteration (the while test, or
+        binding the for target). Leaving: the head after a last `enter` that ends the loop
+        (while) or with the iterator exhausted (for), joined with every `break`.
+        """
+        frame = _LoopFrame()
+        self.loops.append(frame)
+        head = self.env
+        while True:
+            self.env, self.live = dict(head), True
+            enter()
+            self.block(s.body)
+            grown = join_envs([head, *([self.env] if self.live else []), *frame.continues])
+            if grown == head:
+                break
+            head = grown
+        self.loops.pop()
+        self.env, self.live = dict(head), True
+        if isinstance(s, ast.While):
+            self.eval(s.test)
+        self.block(s.orelse)
+        self._meet([(self.env, self.live), *((b, True) for b in frame.breaks)])
+
+    def s_While(self, s: ast.While) -> None:
+        if not self.flow:
+            return self.generic_stmt(s)
+        self._loop(s, lambda: self.eval(s.test))
+
+    def s_Break(self, s: ast.Break) -> None:
+        if self.flow and self.loops:
+            self.loops[-1].breaks.append(dict(self.env))
+            self.live = False
+
+    def s_Continue(self, s: ast.Continue) -> None:
+        if self.flow and self.loops:
+            self.loops[-1].continues.append(dict(self.env))
+            self.live = False
+
+    def s_Raise(self, s: ast.Raise) -> None:
+        self.eval(s.exc)
+        self.eval(s.cause)
+        if self.flow:  # handlers start from their try's accumulator, which already holds this state
+            self.live = False
+
+    def s_Try(self, s: ast.Try | ast.TryStar) -> None:
+        """Handlers start from every state the body passed through (any of them may raise);
+        `finally` also from every state of the else / handler blocks and the abrupt exits."""
+        if not self.flow:
+            return self.generic_stmt(s)
+        loop = self.loops[-1] if self.loops else None
+        marks = (len(loop.breaks), len(loop.continues)) if loop else (0, 0)
+        fin = dict(self.env) if s.finalbody else None
+        if fin is not None:
+            self.tries.append(fin)
+        caught = dict(self.env)
+        self.tries.append(caught)
+        self.block(s.body)
+        self.tries.pop()
+        ends: list[End] = []
+        body_live = self.live
+        env, ok = self._path(self.env, s.orelse)  # else: only after the body completes
+        ends.append((env, ok and body_live))
+        for h in s.handlers:
+            self.env, self.live = dict(caught), True
+            self._handler(h)
+            ends.append((self.env, self.live))
+        if fin is None:
+            self._meet(ends)
+            return
+        self.tries.pop()
+        normal = [e for e, ok in ends if ok]
+        self.env, self.live = join_envs([*normal, fin]), True
+        self.block(s.finalbody)
+        if loop is not None and self.live:  # a break / continue in the try ran this finally first
+            if len(loop.breaks) > marks[0]:
+                loop.breaks.append(dict(self.env))
+            if len(loop.continues) > marks[1]:
+                loop.continues.append(dict(self.env))
+        self.live = self.live and bool(normal)
+
+    s_TryStar = s_Try
 
     def s_FunctionDef(self, s: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         fid = self.prog.by_node[id(s)]
@@ -1068,15 +1262,26 @@ class Interp:
         self.bind(s.name, vals)
 
     def s_Match(self, s: ast.Match) -> None:
+        """Flow mode: cases are alternatives. A case that does not match falls through to
+        the next one with whatever its pattern / guard already bound."""
         subject = self.eval(s.subject)
+        tried = self.env  # state when the next case is tried
+        ends: list[End] = []
         for case in s.cases:
+            if self.flow:
+                self.env, self.live = dict(tried), True
             for n in ast.walk(case.pattern):
                 if isinstance(n, ast.expr):  # value patterns, class names
                     self.eval(n)
                 for name in pattern_names(n):
                     self.bind(name, subject)  # captures: some part of the subject
             self.eval(case.guard)
+            if self.flow:
+                tried = join_envs([tried, self.env])
             self.block(case.body)
+            ends.append((self.env, self.live))
+        if self.flow:
+            self._meet([*ends, (tried, True)])  # `tried`: no case matched
 
     def s_Assign(self, s: ast.Assign) -> None:
         v = self.eval(s.value)
@@ -1095,7 +1300,8 @@ class Interp:
                 _, res = self.invoke_dunder(lhs, spec[0], [rhs], site)
         if isinstance(s.op, (ast.Add, ast.BitOr)):  # xs += ys / s |= t / d |= e mutate in place
             self.store(s.target, lhs, self.state.deref(rhs), fallback=False)
-        self.assign(s.target, res | rhs)
+        # flow mode keeps lhs: `xs += ys` rebinds xs to the same (mutated) container
+        self.assign(s.target, (lhs if self.flow else EMPTY) | res | rhs)
 
     def s_AnnAssign(self, s: ast.AnnAssign) -> None:
         if s.value is not None:
@@ -1123,14 +1329,23 @@ class Interp:
                 slc = self.eval(t.slice)
                 obj = self.eval(t.value)
                 self.invoke_dunder(obj, "__delitem__", [slc], make_site(self.info.id, t, "op"))
+            elif (self.flow and isinstance(t, ast.Name) and not self.class_stack
+                  and t.id in self.info.locals):
+                self.env.pop(t.id, None)  # `del x`: x holds nothing until rebound
             else:
                 self.eval(t)
 
     def s_Return(self, s: ast.Return) -> None:
         self.ret |= self.eval(s.value)
+        if self.flow:
+            self.live = False
 
     def s_For(self, s: ast.For | ast.AsyncFor) -> None:
-        self.assign(s.target, self._iter_expr(s.iter, is_async=isinstance(s, ast.AsyncFor)))
+        elems = self._iter_expr(s.iter, is_async=isinstance(s, ast.AsyncFor))
+        if self.flow:
+            self._loop(s, lambda: self.assign(s.target, elems))
+            return
+        self.assign(s.target, elems)
         self.block(s.body)
         self.block(s.orelse)
 
@@ -1147,9 +1362,16 @@ class Interp:
             exits.append((v, site))
             if it.optional_vars is not None:
                 self.assign(it.optional_vars, entered if found else v)
+        suppressed = dict(self.env) if self.flow else None  # every state of the body
+        if suppressed is not None:
+            self.tries.append(suppressed)
         self.block(s.body)
+        if suppressed is not None:
+            self.tries.pop()
         for v, site in reversed(exits):
             self.invoke_dunder(v, exit_name, [EMPTY, EMPTY, EMPTY], site)
+        if suppressed is not None:  # __exit__ may swallow an exception from anywhere in the body
+            self._meet([(self.env, self.live), (suppressed, True)])
 
     s_AsyncWith = s_With
 
@@ -1181,8 +1403,11 @@ def analyze(node: Node, state: State, prog: Program,
             env: Env | None = None) -> tuple[Env, Vals, Calls]:
     """Analyse one node to its local fixpoint -> (env, return value, [(site, callee)]).
 
-    The local fixpoint starts from the entry state joined with `env` (default: the
-    env already stored for `node` in `state`). The returned env can be passed back
+    Flow mode (`state.flow`): one pass in program order from the entry state; the
+    returned env is the node's summary (every value each local takes), joined with
+    `env` (default: the env already stored for `node` in `state`). Otherwise the local
+    fixpoint starts from the entry state joined with `env` and re-runs the body
+    until the env stops growing. Either way the returned env can be passed back
     in: with the same `state`, analyze(n, s, p, analyze(n, s, p)[0]) returns the
     same result.
 
@@ -1194,9 +1419,14 @@ def analyze(node: Node, state: State, prog: Program,
     """
     it = Interp(prog, state, node)
     it.env = dict(state.entry.get(node, {})) if node.ctx.merged else dict(node.ctx.params)
+    known = state.envs.get(node, {}) if env is None else env
+    if state.flow:  # extern writes are read at each lookup; `known` only joins the summary
+        it.summary = join_envs([it.env, state.extern.get(node.func, {}), known])
+        it.run()
+        return it.summary, it.ret, it.calls
     for name, vals in state.extern.get(node.func, {}).items():  # global / nonlocal writes
         it.env[name] = it.env.get(name, EMPTY) | vals
-    for name, vals in (state.envs.get(node, {}) if env is None else env).items():
+    for name, vals in known.items():
         it.env[name] = it.env.get(name, EMPTY) | vals
     while True:
         snapshot = dict(it.env)

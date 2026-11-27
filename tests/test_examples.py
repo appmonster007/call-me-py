@@ -1,10 +1,12 @@
 """Check callme against the ground truth in examples/cases (see examples/cases/README.md).
 
 Each case's docstring lists `caller -> callee` edges under headers such as `EXPECTED`,
-`STATIC_ONLY` and `SPAWN`. Per case:
+`STATIC_ONLY` and `SPAWN`, and optionally `caller:line -> callee` lines under `SITES`. Per case:
 
-  test_sound    every EXPECTED edge is found
-  test_precise  nothing is found outside EXPECTED | STATIC_ONLY | SPAWN
+  test_sound          every EXPECTED edge is found
+  test_precise        nothing is found outside EXPECTED | STATIC_ONLY | SPAWN
+  test_sites          (cases with SITES) each listed call line resolves to exactly the listed callees
+  test_flow_refines   the flow-sensitive edges are a subset of the flow-insensitive ones
 
 Cases are grouped into feature families (examples/cases/<family>/); which families run is
 configured in pytest.ini (`families`, `exclude_families`) or with `--families` /
@@ -19,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from callme import analyze_file
+from callme import CallGraph, analyze_file
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 CASES = EXAMPLES / "cases"
@@ -74,13 +76,16 @@ def _expectations(case: Path) -> dict[str, set[Edge]]:
     return blocks
 
 
-def _analyze(case: Path, monkeypatch: pytest.MonkeyPatch) -> set[Edge]:
+def _callgraph(case: Path, monkeypatch: pytest.MonkeyPatch, *,
+               flow_sensitive: bool = True) -> CallGraph:
     if case.is_dir():  # module-qualified names (main.main, pkg.core.run) need paths relative to the case
         monkeypatch.chdir(case)
-        cg = analyze_file("main.py", id_style="module")
-    else:
-        cg = analyze_file(case, id_style="short")
-    return set(cg.function_edges())
+        return analyze_file("main.py", id_style="module", flow_sensitive=flow_sensitive)
+    return analyze_file(case, id_style="short", flow_sensitive=flow_sensitive)
+
+
+def _analyze(case: Path, monkeypatch: pytest.MonkeyPatch, *, flow_sensitive: bool = True) -> set[Edge]:
+    return set(_callgraph(case, monkeypatch, flow_sensitive=flow_sensitive).function_edges())
 
 
 def _fmt(title: str, edges: set[Edge]) -> str:
@@ -112,6 +117,40 @@ def test_precise(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert not extra, "\n".join([
         f"{case.name}: {len(extra)} edges outside EXPECTED | {' | '.join(ALLOWED_EXTRA)}",
         _fmt("extra", extra), _fmt("allowed", allowed)])
+
+
+def _has_sites(case: Path) -> bool:
+    doc = ast.get_docstring(ast.parse(_entry(case).read_text(encoding="utf-8"))) or ""
+    return "SITES" in parse_blocks(doc)
+
+
+SITE_PARAMS = [p for p in CASE_PARAMS if _has_sites(p.values[0])]  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("case", SITE_PARAMS)
+def test_sites(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per call line: the analysis reports exactly the traced callees (`caller:line -> callee`)."""
+    want: dict[tuple[str, int], set[str]] = {}
+    for at, callee in _expectations(case)["SITES"]:
+        caller, line = at.rsplit(":", 1)
+        want.setdefault((caller, int(line)), set()).add(callee)
+    cg = _callgraph(case, monkeypatch)
+    wrong: list[str] = []
+    for (caller, line), callees in sorted(want.items()):
+        got = set().union(*(cg.targets(s) for s in cg.sites
+                            if cg.name(s.caller) == caller and s.line == line))
+        if got != callees:
+            wrong.append(f"  {caller}:{line}  expected {sorted(callees)}, found {sorted(got)}")
+    assert not wrong, f"{case.name}: {len(wrong)} call lines resolve differently\n" + "\n".join(wrong)
+
+
+@pytest.mark.parametrize("case", CASE_PARAMS)
+def test_flow_refines(case: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flow sensitivity may only remove edges: its graph is a subgraph of the flow-insensitive one."""
+    fs = _analyze(case, monkeypatch)
+    fi = _analyze(case, monkeypatch, flow_sensitive=False)
+    assert fs <= fi, "\n".join([f"{case.name}: flow-sensitive edges missing from the flow-insensitive graph",
+                                 _fmt("only flow-sensitive", fs - fi)])
 
 
 def _smoke() -> list[Path]:

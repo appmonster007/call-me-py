@@ -10,6 +10,8 @@ Each case starts with a docstring:
 - `STATIC_ONLY`: edges a sound static analysis reports but never execute (dead code)
 - `SPAWN`: semantic edges a tracer cannot attribute (threads, tasks, callbacks run by an event loop)
 - `STUBS`: external names a function collector should keep (only the ones actually used)
+- `SITES`: `caller:line -> callee`, the exact callees of the calls on one line (flow sensitivity:
+  which binding reaches which call; only lines where the analysis should be exact)
 - `NOTE`: caveats
 
 Names: `<module>`, `f`, `Class.method`, `outer.inner`, `<lambda>@<line>`; multi-file cases prefix the module (`pkg.core.run`).
@@ -49,6 +51,7 @@ A new family is just a new folder; `families = all` picks it up.
 | 12 | generators_comprehensions | comprehension/generator frames |
 | 13 | shadowing_rebinding | scopes, rebinding, shadowed builtins |
 | 14 | scoping_nonlocal_global | global/nonlocal, class scope |
+| 49 | flow_sensitivity | rebinding, branches, loops, break, except, comprehension scope |
 
 ### `hof`: functions as values: lambdas, callbacks, factories, containers, decorators
 

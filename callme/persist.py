@@ -42,7 +42,7 @@ from .model import (
 from .pipeline import Facts, PassState
 from .transfer import Env, State
 
-FORMAT, VERSION = "callme-state", 2
+FORMAT, VERSION = "callme-state", 3  # v3: flow_sensitive
 
 Path = str | os.PathLike[str]
 
@@ -73,6 +73,7 @@ class StateDoc(TypedDict):
     version: int
     program: str | None
     max_ctx: int
+    flow_sensitive: bool
     values: list[Row]
     order: Ids
     envs: list[tuple[int, EnvDoc]]
@@ -168,7 +169,7 @@ def state_to_dict(state: State) -> StateDoc:
     entry = [(enc.node(n), enc.env(e)) for n, e in state.entry.items()]
     edges = sorted((enc.node(e.caller), _site(e.site), enc.node(e.callee)) for e in state.edges)
     return {"format": FORMAT, "version": VERSION, "program": state.program,
-            "max_ctx": state.max_ctx, "values": enc.values, "order": order,
+            "max_ctx": state.max_ctx, "flow_sensitive": state.flow, "values": enc.values, "order": order,
             "envs": envs, "ret": ret, "entry": entry, "edges": edges,
             "class_attrs": [(c.uid, enc.env(e)) for c, e in state.class_attrs.items()],
             "inst_attrs": [(enc.tok(i), enc.env(e)) for i, e in state.inst_attrs.items()],
@@ -263,7 +264,7 @@ def state_from_dict(prog: Program, d: object) -> State:
     def env(e: EnvDoc) -> Env:
         return {k: toks(ids) for k, ids in e.items()}
 
-    state = State(doc["max_ctx"], doc["program"])
+    state = State(doc["max_ctx"], doc["program"], doc["flow_sensitive"])
     for i in doc["order"]:
         state.register(get(i, Node))
     state.envs = {get(i, Node): env(e) for i, e in doc["envs"]}
