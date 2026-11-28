@@ -1257,15 +1257,53 @@ _ = f"{StrOnly():{spec_fn()}}"
     } <= edges(src)
 
 
-@pytest.mark.xfail(strict=True, reason="s_AugAssign only evaluates lhs when target is ast.Name")
-def test_augassign_on_attribute_invokes_iadd() -> None:
+def test_augassign_on_attribute_subscript_property_and_reflected() -> None:
     src = """
+def leaf(): return 1
+def on_get(): return Num()
+def on_set(v): return v
+
 class Num:
     def __iadd__(self, other): return self
+
+class RAdd:
+    def __radd__(self, other): return self
+
+class Mapping:
+    def __getitem__(self, k): return Num()
+    def __setitem__(self, k, v): leaf()
+
 class Holder:
-    def __init__(self):
+    def __init__(self, xs):
         self.n = Num()
-h = Holder()
+        self.xs = xs
+    @property
+    def p(self):
+        return on_get()
+    @p.setter
+    def p(self, v):
+        on_set(v)
+
+shared = []
+h = Holder(shared)
 h.n += 1
+h.xs += [leaf]
+shared[0]()
+h.p += 1
+m = Mapping()
+m[0] += 1
+x = 1
+x += RAdd()
 """
-    assert ("<module>", "Num.__iadd__") in edges(src)
+    assert {
+        ("<module>", "Holder.__init__"),
+        ("<module>", "Num.__iadd__"),
+        ("<module>", "leaf"),
+        ("<module>", "Holder.p"),
+        ("Holder.p", "on_get"),
+        ("Holder.p", "on_set"),
+        ("<module>", "Mapping.__getitem__"),
+        ("<module>", "Mapping.__setitem__"),
+        ("Mapping.__setitem__", "leaf"),
+        ("<module>", "RAdd.__radd__"),
+    } <= edges(src)

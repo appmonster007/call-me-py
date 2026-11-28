@@ -60,7 +60,7 @@ class NameLayer(BaseLayer, ABC):
             ns[name] = ns.get(name, EMPTY) | vals
             if not self.readonly:
                 self.state.add_class_attr(cid, name, vals)
-        elif name in self.info.locals:
+        elif name in self.info.locals or self.info.kind == "module":
             if self.flow and not weak:  # strong update: this binding replaces the old one
                 if vals:
                     self.env[name] = vals
@@ -107,6 +107,11 @@ class NameLayer(BaseLayer, ABC):
             if self.node is None:
                 return self.state.union_env(self.info.id, name)
             return self.env.get(name, EMPTY)
+        if self.info.kind == "module":
+            val = (self.state.union_env(self.info.id, name) if self.node is None
+                   else self.env.get(name, EMPTY))
+            if val:
+                return val
         parent_node = self.node.ctx.parent if self.node is not None else None
         f = self.info.parent
         while f is not None:  # lexical chain: closures, then module
@@ -115,6 +120,11 @@ class NameLayer(BaseLayer, ABC):
                 if parent_node is not None:
                     return self.state.envs.get(parent_node, {}).get(name, EMPTY)
                 return self.state.union_env(f, name)
+            if pinfo.kind == "module":
+                val = (self.state.envs.get(parent_node, {}).get(name, EMPTY)
+                       if parent_node is not None else self.state.union_env(f, name))
+                if val:
+                    return val
             parent_node = parent_node.ctx.parent if parent_node is not None else None
             f = pinfo.parent
         if name in BUILTIN_NAMES:  # not shadowed anywhere: the builtin
@@ -225,7 +235,10 @@ class NameLayer(BaseLayer, ABC):
                 for box in boxes:
                     self.state.add_heap(box, vals)
         elif fallback and isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
-            self.assign(target, vals)
+            if isinstance(target, ast.Name):
+                self.bind(target.id, vals, weak=True)
+            else:
+                self.assign(target, vals)
 
     def invoke_dunder(self, recv: Vals, name: str, pos: Sequence[Vals],
                       site: Site) -> tuple[bool, Vals]:

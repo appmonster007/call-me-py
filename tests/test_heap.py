@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import textwrap
 
-import pytest
-
 from callme import analyze_source
 
 
@@ -337,7 +335,6 @@ def test_boxless_store_fallback_flow_insensitive() -> None:
     assert at(src, "c[0]()", flow_sensitive=False) == {"f", "g"}
 
 
-@pytest.mark.xfail(strict=True, reason="NameLayer.store fallback does a strong update in flow mode")
 def test_boxless_store_fallback_preserves_existing_elements_in_flow_mode() -> None:
     src = """
     def f(): pass
@@ -347,8 +344,15 @@ def test_boxless_store_fallback_preserves_existing_elements_in_flow_mode() -> No
         c.append(fn)
         c[0]()
     push_and_call((f,), g)
+
+    # Nested subscript fallback preserves existing elements too.
+    def push_nested(m, fn):
+        m[0].append(fn)
+        m[0][0]()
+    push_nested(((f,),), g)
     """
     assert at(src, "c[0]()", flow_sensitive=True) == {"f", "g"}
+    assert at(src, "m[0][0]()", flow_sensitive=True) == {"f", "g"}
 
 
 def test_yield_yield_from_and_custom_await() -> None:

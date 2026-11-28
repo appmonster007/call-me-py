@@ -702,3 +702,26 @@ def test_cli_formats_print_graph_and_dot_escaping(tmp_path, capsys) -> None:
     assert cli([str(prog_file), "--short-ids", "--icfg", "-o", str(json_out)]) == 0
     doc = json.loads(json_out.read_text(encoding="utf-8"))
     assert "icfg" in doc and set(doc["icfg"]["cfgs"]) == {"<module>", "run", "leaf"}
+
+
+def test_method_stub_fallback_depth_bound_terminates() -> None:
+    """Recursive reads of container-method names (e.g. `.values`, `.keys`) stay finite."""
+    cg = graph("""
+        def leaf(): return 1
+        def walk(e):
+            walk(e.values)
+            walk(e.keys)
+            for v in e.values:
+                walk(v)
+        walk([leaf])
+    """)
+    assert ("walk", "walk") in cg.function_edges()
+
+
+def test_self_analysis_of_cli_converges() -> None:
+    from pathlib import Path
+    from callme import analyze_file
+
+    cli_path = Path(__file__).resolve().parent.parent / "callme" / "__main__.py"
+    cg = analyze_file(cli_path, max_rounds=100)
+    assert len(cg.nodes) > 0 and len(cg.edges) > 0

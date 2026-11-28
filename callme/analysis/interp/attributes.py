@@ -18,7 +18,7 @@ from ...model import (
     Token,
     Vals,
 )
-from ...stubs import BUILTIN_NAMES, METHOD_STUBS, STUBS, STUB_MODULES, STUB_PACKAGES
+from ...stubs import BUILTIN_NAMES, METHOD_STUBS, STUBS, STUB_MODULES, STUB_PACKAGES, shallow
 from .base import bind_attr
 from .calls import CallLayer
 
@@ -156,5 +156,5 @@ class AttributeLayer(CallLayer, ABC):
         finally:
             self._weak_depth -= 1
         if e.attr in METHOD_STUBS and not out:  # xs.sort(key=...), d.get(k, default)
-            out.add(Builtin(METHOD_STUBS[e.attr], (v,)))
+            out.add(Builtin(METHOD_STUBS[e.attr], (shallow(v),)))
         return frozenset(out)

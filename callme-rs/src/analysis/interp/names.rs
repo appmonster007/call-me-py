@@ -53,7 +53,7 @@ impl Interp<'_> {
             if !self.readonly {
                 self.state.add_class_attr(cid, name, vals);
             }
-        } else if self.info.locals.contains(&name) {
+        } else if self.info.locals.contains(&name) || self.info.kind == FuncKind::Module {
             if self.flow && !weak {
                 // strong update: this binding replaces the old one
                 if vals == EMPTY {
@@ -124,6 +124,15 @@ impl Interp<'_> {
                 Some(_) => self.env.get(&name).copied().unwrap_or(EMPTY),
             };
         }
+        if self.info.kind == FuncKind::Module {
+            let val = match self.node {
+                None => self.state.union_env(self.info.id, name),
+                Some(_) => self.env.get(&name).copied().unwrap_or(EMPTY),
+            };
+            if val != EMPTY {
+                return val;
+            }
+        }
         let mut parent_node = self.node.and_then(|n| self.state.ctx_of(n).parent);
         let mut f = self.info.parent;
         while let Some(id) = f {
@@ -137,6 +146,18 @@ impl Interp<'_> {
                     }
                     None => self.state.union_env(id, name),
                 };
+            }
+            if pinfo.kind == FuncKind::Module {
+                let val = match parent_node {
+                    Some(p) => {
+                        self.state.read(DepKey::Env(p));
+                        self.state.envs.get(p).and_then(|e| e.get(&name)).copied().unwrap_or(EMPTY)
+                    }
+                    None => self.state.union_env(id, name),
+                };
+                if val != EMPTY {
+                    return val;
+                }
             }
             parent_node = parent_node.and_then(|p| self.state.ctx_of(p).parent);
             f = pinfo.parent;
@@ -277,8 +298,12 @@ impl Interp<'_> {
                     self.state.add_heap(b, vals);
                 }
             }
-        } else if fallback && matches!(target, Expr::Name(_) | Expr::Attribute(_) | Expr::Subscript(_)) {
-            self.assign(target, vals);
+        } else if fallback {
+            match target {
+                Expr::Name(n) => self.bind(n.id, vals, true),
+                Expr::Attribute(_) | Expr::Subscript(_) => self.assign(target, vals),
+                _ => {}
+            }
         }
     }
 

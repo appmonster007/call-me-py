@@ -173,6 +173,7 @@ impl Interp<'_> {
     /// matches meets the ends of the cases.
     pub fn s_match(&mut self, x: &Match) {
         let subject = self.eval(&x.subject);
+        let captured = self.state.deref(subject);
         let mut tried = self.env.clone(); // state when the next case is tried
         let mut ends: Vec<End> = Vec::new();
         for case in &x.cases {
@@ -185,7 +186,7 @@ impl Interp<'_> {
                     self.eval(e); // value patterns, class names
                 }
                 for name in pattern_names(n) {
-                    self.bind(name, subject, false); // captures: some part of the subject
+                    self.bind(name, captured, false); // captures: some part of the subject
                 }
             }
             self.eval_opt(case.guard.as_ref());

@@ -55,16 +55,8 @@ fn cmp_dunders(op: CmpOp) -> Option<(Name, Name)> {
 }
 
 impl Interp<'_> {
-    /// Evaluate `x[i]` when it is read: call `__getitem__` on instances that define it.
-    ///
-    /// Other values are containers, collapsed to their elements, so their value plus their
-    /// stored contents is the result. A store or delete target gives `EMPTY`.
-    pub fn e_subscript(&mut self, outer: &Expr, e: &Subscript) -> Vals {
-        let slc = self.eval(&e.slice);
-        let val = self.eval(&e.value);
-        if !is_load(outer) {
-            return EMPTY;
-        }
+    /// Read `val[slc]` at `outer`: call `__getitem__` on instances/stubs and deref containers.
+    fn subscript_load(&mut self, val: Vals, slc: Vals, outer: &Expr) -> Vals {
         let site = self.site(outer, SiteKind::Op);
         let mut out = EMPTY;
         let mut rest: Vec<TokId> = Vec::new();
@@ -97,6 +89,19 @@ impl Interp<'_> {
         let rest = self.state.values.of(rest);
         let d = self.state.deref(rest);
         self.u(out, d)
+    }
+
+    /// Evaluate `x[i]` when it is read: call `__getitem__` on instances that define it.
+    ///
+    /// Other values are containers, collapsed to their elements, so their value plus their
+    /// stored contents is the result. A store or delete target gives `EMPTY`.
+    pub fn e_subscript(&mut self, outer: &Expr, e: &Subscript) -> Vals {
+        let slc = self.eval(&e.slice);
+        let val = self.eval(&e.value);
+        if !is_load(outer) {
+            return EMPTY;
+        }
+        self.subscript_load(val, slc, outer)
     }
 
     /// Evaluate `a op b` by calling `a.__op__(b)`, or `b.__rop__(a)` if `a` does not have it.
@@ -183,24 +188,38 @@ impl Interp<'_> {
         EMPTY
     }
 
-    /// Run `target op= value`, calling `__iop__` on the target, or `__op__` when it has none.
+    /// Run `target op= value`, calling `__iop__`, else `__op__`, else reflected `__rop__`.
     ///
+    /// Evaluates the target's subexpressions once before reading its value and writing back.
     /// `+=` and `|=` also store the value's elements into the target's containers, since lists,
     /// sets and dicts are mutated in place. In flow mode the target keeps its old value too,
     /// because it still refers to the same container.
     pub fn s_aug_assign(&mut self, s: &AugAssign) {
-        let rhs = self.eval(&s.value);
+        let mut obj = EMPTY;
+        let mut slc = EMPTY;
         let lhs = match &s.target {
             Expr::Name(n) => self.lookup(n.id),
+            Expr::Attribute(a) => {
+                obj = self.eval(&a.value);
+                self.attribute(obj, &s.target, a)
+            }
+            Expr::Subscript(sub) => {
+                obj = self.eval(&sub.value);
+                slc = self.eval(&sub.slice);
+                self.subscript_load(obj, slc, &s.target)
+            }
             _ => EMPTY,
         };
-        let (op, _, iop) = binop_dunders(s.op);
-        let mut res = EMPTY;
-        if lhs != EMPTY {
-            let site = self.site(&s.value, SiteKind::Op);
-            let (found, r) = self.invoke_dunder(lhs, iop, &[rhs], site);
-            res = if found { r } else { self.invoke_dunder(lhs, op, &[rhs], site).1 };
-        }
+        let rhs = self.eval(&s.value);
+        let (op, rop, iop) = binop_dunders(s.op);
+        let site = self.site(&s.value, SiteKind::Op);
+        let (found, r) = self.invoke_dunder(lhs, iop, &[rhs], site);
+        let res = if found {
+            r
+        } else {
+            let (found, r) = self.invoke_dunder(lhs, op, &[rhs], site);
+            if found { r } else { self.invoke_dunder(rhs, rop, &[lhs], site).1 }
+        };
         if matches!(s.op, Operator::Add | Operator::BitOr) {
             // xs += ys / s |= t / d |= e mutate in place
             let d = self.state.deref(rhs);
@@ -209,7 +228,19 @@ impl Interp<'_> {
         // flow mode keeps lhs: `xs += ys` rebinds xs to the same (mutated) container
         let keep = if self.flow { lhs } else { EMPTY };
         let a = self.u(keep, res);
-        let all = self.u(a, rhs);
-        self.assign(&s.target, all);
+        let new_val = self.u(a, rhs);
+        match &s.target {
+            Expr::Name(n) => self.bind(n.id, new_val, false),
+            Expr::Attribute(a) => {
+                let site = self.site(&s.target, SiteKind::Attr);
+                self.set_attr(obj, a.attr, new_val, site);
+            }
+            Expr::Subscript(sub) => {
+                let site = self.site(&s.target, SiteKind::Op);
+                let (found, _) = self.invoke_dunder(obj, name!("__setitem__"), &[slc, new_val], site);
+                self.store(&sub.value, obj, new_val, !found);
+            }
+            _ => self.assign(&s.target, new_val),
+        }
     }
 }

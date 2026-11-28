@@ -3,7 +3,7 @@
 
 use crate::model::{ClassId, EMPTY, SiteKind, TokId, Token, Vals};
 use crate::name;
-use crate::stubs::{BUILTIN_NAMES, Kws, METHOD_STUBS, STUB_MODULES, STUB_PACKAGES, STUBS};
+use crate::stubs::{BUILTIN_NAMES, Kws, METHOD_STUBS, STUB_MODULES, STUB_PACKAGES, STUBS, shallow};
 use crate::syntax::Name;
 use crate::syntax::ast::{Attribute, Expr};
 
@@ -222,9 +222,10 @@ impl Interp<'_> {
             && let Some(&stub) = METHOD_STUBS.get(&attr)
         {
             // xs.sort(key=...), d.get(k, default)
+            let recv = shallow(&mut self.state.values, v);
             out.push(self.state.values.tok(Token::Builtin {
                 name: stub,
-                bound: vec![v].into(),
+                bound: vec![recv].into(),
                 bound_kw: Vec::new().into(),
             }));
         }

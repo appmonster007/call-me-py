@@ -42,6 +42,7 @@ from .registry import (
     StubFn,
     call,
     fold,
+    shallow,
     stub,
     union,
 )
@@ -54,5 +55,5 @@ BUILTIN_NAMES = frozenset(n for n in STUBS if "." not in n and not n.startswith(
 
 __all__ = [
     "BUILTIN_NAMES", "METHOD_STUBS", "MODULES", "STUB_MODULES", "STUB_PACKAGES", "STUBS", "Args",
-    "Host", "HostState", "StubFn", "call", "fold", "stub", "union",
+    "Host", "HostState", "StubFn", "call", "fold", "shallow", "stub", "union",
 ]

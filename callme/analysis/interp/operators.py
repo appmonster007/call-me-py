@@ -48,16 +48,8 @@ class OperatorLayer(ExprLayer):
     # fields of BaseLayer that this layer assigns
     _weak_depth: int
 
-    def e_Subscript(self, e: ast.Subscript) -> Vals:
-        """Evaluate `x[i]` when it is read: call `__getitem__` on instances that define it.
-
-        Other values are containers, collapsed to their elements, so their value plus their
-        stored contents is the result. A store or delete target gives `EMPTY`.
-        """
-        slc = self.eval(e.slice)
-        val = self.eval(e.value)
-        if not isinstance(e.ctx, ast.Load):
-            return EMPTY
+    def _subscript_load(self, val: Vals, slc: Vals, e: ast.Subscript) -> Vals:
+        """Read `val[slc]` at `e`: call `__getitem__` on instances/stubs and deref containers."""
         site = make_site(self.info.id, e, "op")
         out = EMPTY
         rest: set[Token] = set()
@@ -78,6 +70,18 @@ class OperatorLayer(ExprLayer):
         finally:
             self._weak_depth -= 1
         return out | self.state.deref(frozenset(rest))
+
+    def e_Subscript(self, e: ast.Subscript) -> Vals:
+        """Evaluate `x[i]` when it is read: call `__getitem__` on instances that define it.
+
+        Other values are containers, collapsed to their elements, so their value plus their
+        stored contents is the result. A store or delete target gives `EMPTY`.
+        """
+        slc = self.eval(e.slice)
+        val = self.eval(e.value)
+        if not isinstance(e.ctx, ast.Load):
+            return EMPTY
+        return self._subscript_load(val, slc, e)
 
     def e_BinOp(self, e: ast.BinOp) -> Vals:
         """Evaluate `a op b` by calling `a.__op__(b)`, or `b.__rop__(a)` if `a` does not have it."""
@@ -161,22 +165,47 @@ class OperatorLayer(ExprLayer):
         return EMPTY
 
     def s_AugAssign(self, s: ast.AugAssign) -> None:
-        """Run `target op= value`, calling `__iop__` on the target, or `__op__` when it has none.
+        """Run `target op= value`, calling `__iop__`, else `__op__`, else reflected `__rop__`.
 
+        Evaluates the target's subexpressions once before reading its value and writing back.
         `+=` and `|=` also store the value's elements into the target's containers, since lists,
         sets and dicts are mutated in place. In flow mode the target keeps its old value too,
         because it still refers to the same container.
         """
+        obj = EMPTY
+        slc = EMPTY
+        if isinstance(s.target, ast.Name):
+            lhs = self.lookup(s.target.id)
+        elif isinstance(s.target, ast.Attribute):
+            obj = self.eval(s.target.value)
+            lhs = self.attribute(obj, s.target)
+        elif isinstance(s.target, ast.Subscript):
+            obj = self.eval(s.target.value)
+            slc = self.eval(s.target.slice)
+            lhs = self._subscript_load(obj, slc, s.target)
+        else:
+            lhs = EMPTY
         rhs = self.eval(s.value)
-        lhs = self.lookup(s.target.id) if isinstance(s.target, ast.Name) else EMPTY
         spec = BINOP_DUNDERS.get(type(s.op))
         res = EMPTY
-        if spec is not None and lhs:
+        if spec is not None:
             site = make_site(self.info.id, s.value, "op")
             found, res = self.invoke_dunder(lhs, spec[2], [rhs], site)
             if not found:
-                _, res = self.invoke_dunder(lhs, spec[0], [rhs], site)
+                found, res = self.invoke_dunder(lhs, spec[0], [rhs], site)
+            if not found:
+                _, res = self.invoke_dunder(rhs, spec[1], [lhs], site)
         if isinstance(s.op, (ast.Add, ast.BitOr)):  # xs += ys / s |= t / d |= e mutate in place
             self.store(s.target, lhs, self.state.deref(rhs), fallback=False)
         # flow mode keeps lhs: `xs += ys` rebinds xs to the same (mutated) container
-        self.assign(s.target, (lhs if self.flow else EMPTY) | res | rhs)
+        new_val = (lhs if self.flow else EMPTY) | res | rhs
+        if isinstance(s.target, ast.Name):
+            self.bind(s.target.id, new_val)
+        elif isinstance(s.target, ast.Attribute):
+            self.set_attr(obj, s.target.attr, new_val, make_site(self.info.id, s.target, "attr"))
+        elif isinstance(s.target, ast.Subscript):
+            found, _ = self.invoke_dunder(obj, "__setitem__", [slc, new_val],
+                                          make_site(self.info.id, s.target, "op"))
+            self.store(s.target.value, obj, new_val, fallback=not found)
+        else:
+            self.assign(s.target, new_val)

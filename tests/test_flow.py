@@ -4,8 +4,6 @@ from __future__ import annotations
 import ast
 import textwrap
 
-import pytest
-
 from callme import CallGraph, analyze_source
 from callme.frontend.scopes import scope_must_writes
 
@@ -302,17 +300,23 @@ def test_match_patterns_guards_and_fallthrough() -> None:
     assert ("run", "guard_fn") in cg.function_edges()
 
 
-@pytest.mark.xfail(strict=True, reason="s_Match binds subject without State.deref")
 def test_match_sequence_destructuring_reads_mutated_box() -> None:
     src = """
         def f(): pass
+        def g(): pass
         xs = []
         xs.append(f)
         match xs:
-            case [g]:
-                g()
+            case [h]:
+                h()
+        d = {}
+        d["k"] = g
+        match d:
+            case {"k": h2}:
+                h2()
     """
-    assert _at(src, "g()") == {"f"}
+    assert _at(src, "h()") == {"f"}
+    assert _at(src, "h2()") == {"g"}
 
 
 # ------------------------------------------------------------ scope_must_writes

@@ -164,16 +164,6 @@ examples and on PyPI packages, run from site-packages:
 - **Errors.** Python raises an exception; Rust returns `Error`. The CLI prints the error and
   exits with status 1, or 2 for a usage error.
 
-## Inherited behaviour worth knowing
-
-Both implementations fail to converge on the analyzer's own CLI (`callme/__main__.py`). After
-39 rounds the graph is complete (648 nodes, 2576 edges), but each later round adds one more
-`<elements>` token nested one level deeper. The cause is the fallback for container methods in
-`Interp.attribute` / `attributes.rs`: it binds the receiver's value into a `Builtin` token with
-no depth bound (`shallow`), and the receiver can already hold such a token. Bounding it would
-change results, so it is reported here rather than changed in the port. It should be fixed in
-both versions together.
-
 ## Upgrading the parser
 
 Bump the three `ruff_*` versions in `Cargo.toml`, fix `src/syntax/lower.rs` where Ruff's tree

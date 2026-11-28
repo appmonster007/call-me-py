@@ -144,6 +144,7 @@ class FlowLayer(DefLayer):
         matches meets the ends of the cases.
         """
         subject = self.eval(s.subject)
+        captured = self.state.deref(subject)
         tried = self.env  # state when the next case is tried
         ends: list[End] = []
         for case in s.cases:
@@ -153,7 +154,7 @@ class FlowLayer(DefLayer):
                 if isinstance(n, ast.expr):  # value patterns, class names
                     self.eval(n)
                 for name in pattern_names(n):
-                    self.bind(name, subject)  # captures: some part of the subject
+                    self.bind(name, captured)  # captures: some part of the subject
             self.eval(case.guard)
             if self.flow:
                 tried = join_envs([tried, self.env])

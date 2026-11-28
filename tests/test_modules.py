@@ -392,13 +392,27 @@ def test_imports_relative_invalid_dynamic_stubs_and_module_writes(tmp_path: Path
         parse_file(bad / "main.py")
 
 
-@pytest.mark.xfail(strict=True, reason="star-imported stub names are not in module locals, so NameLayer.bind drops them")
 def test_star_import_from_stub_module_binds_stubs(tmp_path: Path) -> None:
     make(tmp_path, {
-        "main.py": """\
+        "helpers.py": """\
             from functools import *
             def id_fn(x): return x
-            partial(id_fn, 1)()
+            def use_inside():
+                return partial(id_fn, 1)()
+            """,
+        "main.py": """\
+            from functools import *
+            from helpers import partial as reexported_partial, use_inside
+            def a(x): return x
+            def b(x): return x
+            partial(a, 1)()
+            reexported_partial(b, 2)()
+            use_inside()
             """,
     })
-    assert ("main.<module>", "main.id_fn") in edges(tmp_path / "main.py")
+    assert edges(tmp_path / "main.py") == {
+        ("main.<module>", "main.a"),
+        ("main.<module>", "main.b"),
+        ("main.<module>", "helpers.use_inside"),
+        ("helpers.use_inside", "helpers.id_fn"),
+    }
