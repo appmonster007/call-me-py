@@ -27,6 +27,7 @@ python info/build.py                      # after changing callme/: regenerate i
 | `callme/analysis/` | `state.py` (`State`, the global tables), `interp/` (`Interp`, the abstract interpreter, one layer per module), `pipeline.py` (multi-pass driver), `solver.py` (the call graph pass, `solve`) |
 | `callme/output/` | `callgraph.py` (the `CallGraph` result), `icfg.py`, `export.py` (JSON / DOT), `persist.py` (saving and loading state) |
 | `callme/__init__.py`, `__main__.py` | public API, CLI |
+| `callme-rs/` | the Rust port, module for module (see `callme-rs/README.md`); after a behaviour change in `callme/`, port it and run `python3 callme-rs/tools/parity.py` |
 
 `Interp` is a chain of classes, each subclassing the one below: `base.py` → `names.py` →
 `modules.py` → `calls.py` → `attributes.py` → `expressions.py` → `operators.py` →

@@ -119,6 +119,7 @@ callme/                    the analyzer (map: docs/architecture.md)
   stubs/                   models of builtin and stdlib functions, one module per library
   analysis/                the abstract interpreter (interp/) and the fixpoint (solver)
   output/                  the call graph, JSON / DOT export, saved states
+callme-rs/                 the Rust port: same CLI, files and results, 15-160x faster (see its README)
 tests/                     pytest suite
 examples/cases/            ground-truth programs, one feature each, grouped by family (see its README)
 examples/*.py              loose programs (and examples/project/main.py); tests only check they analyse

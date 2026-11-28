@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import textwrap
 
+import pytest
+
 from callme import analyze_source
 
 
@@ -226,3 +228,154 @@ def test_calling_a_container_is_harmless() -> None:
     """
     assert at(src, "xs()") == set()
     assert at(src, "{}['k']()") == set()
+
+
+def test_container_mutations_extend_insert_set_dict_update_and_or() -> None:
+    src = """
+    def f1(): pass
+    def f2(): pass
+    def f3(): pass
+    def f4(): pass
+    def f5(): pass
+    def f6(): pass
+    def f7(): pass
+    def f8(): pass
+
+    src_list = []
+    src_list.append(f1)
+    dst_list = []
+    dst_list.extend(src_list)
+    dst_list.insert(0, f2)
+    dst_list[0]()
+
+    s = set()
+    s.add(f3)
+    s.update([f4])
+    s |= {f5}
+    for fn_s in s:
+        fn_s()
+
+    d = {}
+    d.update({"a": f6}, b=f7)
+    d |= {"c": f8}
+    for fn_d in d.values():
+        fn_d()
+
+    d2 = {}
+    d2.setdefault("k", default=f2)()
+    """
+    assert at(src, "dst_list[0]()") == {"f1", "f2"}
+    assert at(src, "fn_s()") == {"f3", "f4", "f5"}
+    assert at(src, "fn_d()") == {"f6", "f7", "f8"}
+    assert at(src, "d2.setdefault('k', default=f2)()") == {"f2"}
+
+
+def test_displays_unpacking_comprehensions_and_chained_assign() -> None:
+    src = """
+    def f(): pass
+    def g(): pass
+    def kfn(): return "k"
+    def vfn(): return f
+    def make(): return g
+
+    s = {f, g}
+    sc = {x for x in s}
+    for h1 in sc:
+        h1()
+
+    d1 = {"x": f}
+    d2 = {**d1, kfn(): vfn()}
+    d2["x"]()
+
+    multi = [fn() for row in [[f], [g]] for fn in row]
+    a = b = make()
+    a()
+    b()
+
+    xs = []
+    xs.append(f)
+    xs.append(g)
+    head, *tail = xs
+    head()
+    tail[0]()
+    """
+    assert at(src, "h1()") == {"f", "g"}
+    assert at(src, "d2['x']()") == {"f"}
+    assert at(src, "fn()") == {"f", "g"}
+    assert at(src, "a()") == {"g"}
+    assert at(src, "b()") == {"g"}
+    assert at(src, "head()") == {"f", "g"}
+    assert at(src, "tail[0]()") == {"f", "g"}
+    cg = analyze_source(textwrap.dedent(src), id_style="short")
+    assert {("<module>", "kfn"), ("<module>", "vfn")} <= cg.function_edges()
+
+
+def test_cyclic_box_deref_terminates() -> None:
+    src = """
+    def f(): pass
+
+    # Self-referential box cycle must terminate in State.deref.
+    cyc = []
+    cyc.append(cyc)
+    cyc.append(f)
+    cyc[0][0]()
+    """
+    assert at(src, "cyc[0][0]()") == {"f"}
+
+
+def test_boxless_store_fallback_flow_insensitive() -> None:
+    src = """
+    def f(): pass
+    def g(): pass
+
+    # Container without a Box (e.g. parameter given a tuple) falls back to widening the target.
+    def push_and_call(c, fn):
+        c.append(fn)
+        c[0]()
+    push_and_call((f,), g)
+    """
+    assert at(src, "c[0]()", flow_sensitive=False) == {"f", "g"}
+
+
+@pytest.mark.xfail(strict=True, reason="NameLayer.store fallback does a strong update in flow mode")
+def test_boxless_store_fallback_preserves_existing_elements_in_flow_mode() -> None:
+    src = """
+    def f(): pass
+    def g(): pass
+
+    def push_and_call(c, fn):
+        c.append(fn)
+        c[0]()
+    push_and_call((f,), g)
+    """
+    assert at(src, "c[0]()", flow_sensitive=True) == {"f", "g"}
+
+
+def test_yield_yield_from_and_custom_await() -> None:
+    src = """
+    def f(): pass
+    def g(): pass
+    def h(): pass
+
+    def gen():
+        xs = []
+        xs.append(f)
+        yield from xs
+        yield g
+
+    for fn in gen():
+        fn()
+
+    class Awaitable:
+        def __await__(self):
+            return h
+
+    async def runner():
+        got = await Awaitable()
+        got()
+    runner()
+    """
+    assert at(src, "fn()") == {"f", "g"}
+    assert at(src, "got()") == {"h"}
+    cg = analyze_source(textwrap.dedent(src), id_style="short")
+    assert ("runner", "Awaitable.__await__") in cg.function_edges()

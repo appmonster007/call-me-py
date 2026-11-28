@@ -995,3 +995,277 @@ Child.meta_util()
         ("Base.setup", "leaf"),
         ("Meta.meta_util", "leaf"),
     }
+
+
+def test_cyclic_and_inconsistent_mro_and_self_metaclass() -> None:
+    from callme.analysis import State
+    from callme.model import ClassId
+
+    # Inconsistent hierarchy triggers C3 DFS fallback without crashing and still resolves methods.
+    src = """
+def from_x(): return 1
+def from_y(): return 2
+class X:
+    def mx(self): return from_x()
+class Y:
+    def my(self): return from_y()
+class A(X, Y): pass
+class B(Y, X): pass
+class C(A, B): pass
+c = C()
+c.mx()
+c.my()
+"""
+    assert {("<module>", "X.mx"), ("<module>", "Y.my"),
+            ("X.mx", "from_x"), ("Y.my", "from_y")} <= edges(src)
+
+    # Cyclic bases and self-metaclass terminate safely.
+    st = State()
+    ca = ClassId("A", "t.py", 1, 0)
+    cb = ClassId("B", "t.py", 2, 0)
+    st.add_bases(ca, [cb])
+    st.add_bases(cb, [ca])
+    assert set(st.mro(ca)) == {ca, cb}
+    st.add_metaclass(ca, ca)
+    assert ca not in st.metaclasses
+
+
+def test_super_edge_cases_and_metaclass_super_fallbacks() -> None:
+    src = """
+def leaf(): return 1
+def zero_param():
+    return super()
+def outside(x):
+    return super()
+
+class Unrelated:
+    def m(self): return leaf()
+
+class Target:
+    def m(self): return 0
+
+class BaseMeta(type):
+    @staticmethod
+    def sm(): return leaf()
+
+class SubMeta(BaseMeta):
+    def __new__(mcls, name, bases, ns):
+        return super().__new__(mcls)
+    def __setattr__(cls, name, val):
+        super().__setattr__(name, val)
+    def run_sm(cls):
+        super().__new__(cls)
+        super().__setattr__("a", 1)
+        return super().sm()
+
+class StaticCallMeta(type):
+    @staticmethod
+    def __call__(*args):
+        return leaf()
+
+class K(metaclass=SubMeta):
+    pass
+
+class S(metaclass=StaticCallMeta):
+    pass
+
+zero_param()
+outside(Target())
+super(Unrelated, Target()).m()
+K.sm()
+K.run_sm()
+K.x = 1
+S()
+"""
+    got = edges(src)
+    assert {("<module>", "SubMeta.__new__"), ("<module>", "BaseMeta.sm"),
+            ("<module>", "SubMeta.run_sm"), ("SubMeta.run_sm", "BaseMeta.sm"),
+            ("BaseMeta.sm", "leaf"), ("<module>", "StaticCallMeta.__call__"),
+            ("StaticCallMeta.__call__", "leaf")} <= got
+    assert ("<module>", "Unrelated.m") not in got
+
+
+def test_property_accessors_non_descriptor_attr_class_kwstar_and_known_attrs() -> None:
+    src = """
+def g1(): return 1
+def g2(): return 2
+def s1(v): return v
+def d1(): return 0
+def miss(): return 9
+def sub_hook(): return 3
+def helper_fn(): return 4
+
+class Helper:
+    def run(self): return helper_fn()
+
+class Base:
+    ann: int
+    def __init__(self):
+        self.inherited = 1
+    def __init_subclass__(cls, cb=None, **kw):
+        if cb:
+            cb()
+    def __getattr__(self, name):
+        return miss()
+
+kw = {"cb": sub_hook}
+class Child(Base, **kw):
+    helper = Helper()
+    @property
+    def p(self):
+        return g1()
+    @p.setter
+    def p(self, v):
+        s1(v)
+    @p.deleter
+    def p(self):
+        d1()
+    p2 = p.getter(lambda self: g2())
+
+c = Child()
+c.ann          # annotated on Base: must NOT trigger __getattr__
+c.inherited    # assigned on self in Base: must NOT trigger __getattr__
+c.helper.run() # non-descriptor instance stored on class
+Child.p.fget(c)
+Child.p.fset(c, 1)
+Child.p.fdel(c)
+c.p2
+"""
+    got = edges(src)
+    assert ("<module>", "Base.__getattr__") not in got
+    assert ("Base.__getattr__", "miss") not in got
+    assert {("<module>", "Base.__init_subclass__"), ("Base.__init_subclass__", "sub_hook"),
+            ("<module>", "Helper.run"), ("Helper.run", "helper_fn"),
+            ("<module>", "Child.p"), ("Child.p", "g1"), ("Child.p", "s1"), ("Child.p", "d1")} <= got
+    assert any(callee == "g2" for _, callee in got)
+
+
+def test_dataclass_default_inheritance_helpers_and_object_setattr_shadow() -> None:
+    src = """
+from dataclasses import asdict, astuple, dataclass, field, make_dataclass
+
+def dflt_base(): return 1
+def dflt_sub(): return 2
+def post_cls(): return 3
+def post_stat(): return 4
+def on_set_sub(): return 5
+def on_set_base(): return 6
+
+@dataclass
+class BaseDC:
+    a: int = field()
+    cb: object = field(default=dflt_base)
+
+@dataclass
+class SubDC(BaseDC):
+    cb: object = field(default=dflt_sub)
+    @classmethod
+    def __post_init__(cls):
+        post_cls()
+
+@dataclass
+class StatDC:
+    @staticmethod
+    def __post_init__():
+        post_stat()
+
+s = SubDC()
+s.cb()
+StatDC()
+d = asdict(s)
+d["k"] = post_stat
+d["k"]()
+astuple(s)
+make_dataclass("Dyn", [("x", int)])
+
+# object.__setattr__ skips shadowed descriptor from base class.
+class BaseDesc:
+    def __set__(self, obj, v): on_set_base()
+class SubDesc:
+    def __set__(self, obj, v): on_set_sub()
+class P:
+    x = BaseDesc()
+class Q(P):
+    x = SubDesc()
+    def __setattr__(self, name, v):
+        object.__setattr__(self, name, v)
+Q().x = 1
+"""
+    got = edges(src)
+    assert {("<module>", "dflt_sub"), ("<module>", "SubDC.__post_init__"),
+            ("SubDC.__post_init__", "post_cls"), ("<module>", "StatDC.__post_init__"),
+            ("StatDC.__post_init__", "post_stat"), ("<module>", "post_stat"),
+            ("Q.__setattr__", "SubDesc.__set__"), ("SubDesc.__set__", "on_set_sub")} <= got
+    assert ("Q.__setattr__", "BaseDesc.__set__") not in got
+    assert ("<module>", "dflt_base") not in got
+
+
+def test_remaining_dunder_operators_fstrings_and_augassign_fallback() -> None:
+    src = """
+def ping(): return 1
+def spec_fn(): return ""
+
+class LenOnly:
+    def __len__(self): return 1
+
+class ReprOnly:
+    def __repr__(self): return "R"
+
+class StrOnly:
+    def __str__(self): return "S"
+
+class Ops:
+    def __pos__(self): return self
+    def __invert__(self): return self
+    def __matmul__(self, o): return self
+    def __rpow__(self, o): return self
+    def __gt__(self, o): return True
+    def __lt__(self, o): return True
+    def __contains__(self, o): return True
+    def __add__(self, o): return self
+    def touch(self): return ping()
+
+o = Ops()
+(+o).touch()
+(~o).touch()
+(o @ o).touch()
+(2 ** o).touch()
+1 < o < 3
+0 not in o
+o += 1  # falls back from missing __iadd__ to __add__
+not LenOnly()  # falls back from missing __bool__ to __len__
+_ = f"{ReprOnly()}"
+_ = f"{ReprOnly()!s}"
+_ = f"{StrOnly()!s}"
+_ = f"{StrOnly():{spec_fn()}}"
+"""
+    assert {
+        ("<module>", "Ops.__pos__"),
+        ("<module>", "Ops.__invert__"),
+        ("<module>", "Ops.__matmul__"),
+        ("<module>", "Ops.__rpow__"),
+        ("<module>", "Ops.__gt__"),
+        ("<module>", "Ops.__lt__"),
+        ("<module>", "Ops.__contains__"),
+        ("<module>", "Ops.__add__"),
+        ("<module>", "Ops.touch"),
+        ("Ops.touch", "ping"),
+        ("<module>", "LenOnly.__len__"),
+        ("<module>", "ReprOnly.__repr__"),
+        ("<module>", "StrOnly.__str__"),
+        ("<module>", "spec_fn"),
+    } <= edges(src)
+
+
+@pytest.mark.xfail(strict=True, reason="s_AugAssign only evaluates lhs when target is ast.Name")
+def test_augassign_on_attribute_invokes_iadd() -> None:
+    src = """
+class Num:
+    def __iadd__(self, other): return self
+class Holder:
+    def __init__(self):
+        self.n = Num()
+h = Holder()
+h.n += 1
+"""
+    assert ("<module>", "Num.__iadd__") in edges(src)

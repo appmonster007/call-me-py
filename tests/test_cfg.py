@@ -232,3 +232,129 @@ def test_match_case_bodies_are_analysed() -> None:
     assert {("run", "a"), ("run", "b")} <= edges
     c = cg.prog.cfgs[next(f for f in cg.prog.funcs if f.qualname == "run")]
     assert sum(n.kind == BRANCH for n in c.nodes) >= 3  # two cases + one guard
+
+
+def test_continue_for_else_and_dead_jump_cfg() -> None:
+    c = cfg_of("""
+        def f(xs):
+            for x in xs:
+                if skip(x):
+                    continue
+                if stop(x):
+                    break
+                work(x)
+            else:
+                on_else()
+            after()
+            return 1
+            return 2
+    """, "f")
+    head = find(c, LOOP)
+    cont = find(c, "stmt", "continue")
+    brk = find(c, "stmt", "break")
+    on_else = c.calls[next(s for s in c.calls if s.text == "on_else()")][0]
+    after = c.calls[next(s for s in c.calls if s.text == "after()")][0]
+    assert head in succ(c, cont)
+    assert on_else in succ(c, head, FALSE)
+    assert after in succ(c, brk) and on_else not in succ(c, brk)
+
+
+def test_try_star_and_finally_abrupt_exits_cfg() -> None:
+    c = cfg_of("""
+        def f(xs):
+            for x in xs:
+                try:
+                    risky(x)
+                    if x:
+                        break
+                    continue
+                except* ValueError:
+                    handle()
+                finally:
+                    cleanup()
+    """, "f")
+    handler = find(c, "handler")
+    risky_call = c.calls[next(s for s in c.calls if s.text == "risky(x)")][0]
+    cleanup_call, cleanup_ret = c.calls[next(s for s in c.calls if s.text == "cleanup()")]
+    brk = find(c, "stmt", "break")
+    cont = find(c, "stmt", "continue")
+    assert handler in succ(c, risky_call, EXC)
+    assert cleanup_call in succ(c, brk)
+    assert cleanup_call in succ(c, cont)
+    assert c.exit in reachable(c, cleanup_ret)
+
+
+def test_assert_boolop_ifexp_dict_assign_and_multi_gen_cfg() -> None:
+    c = cfg_of("""
+        def f(xs):
+            assert check(), err_msg()
+            _ = p() and q() and r()
+            _ = a() if cond() else b()
+            tgt()[key()] = val()
+            _ = {k1(): v1(), k2(): v2()}
+            _ = [use(x, y) for x in outer_it() for y in inner_it(x)]
+            lam = lambda x=dflt(): inner_only()
+            very_long_stmt_name = "01234567890123456789012345678901234567890123456789"
+            return lam
+    """, "f")
+    err_call = c.calls[next(s for s in c.calls if s.text == "err_msg()")][0]
+    assert any(e.kind == FALSE for e in c.pred(err_call))
+    assert c.exit in reachable(c, err_call)
+
+    q_call = c.calls[next(s for s in c.calls if s.text == "q()")][0]
+    assert any(e.kind == TRUE for e in c.pred(q_call))  # `and` evaluates q() only when truthy
+
+    a_call = c.calls[next(s for s in c.calls if s.text == "a()")][0]
+    b_call = c.calls[next(s for s in c.calls if s.text == "b()")][0]
+    assert any(e.kind == TRUE for e in c.pred(a_call))
+    assert any(e.kind == FALSE for e in c.pred(b_call))
+
+    # Assignment evaluates RHS before target subexpressions.
+    val_ret = c.calls[next(s for s in c.calls if s.text == "val()")][1]
+    tgt_call = c.calls[next(s for s in c.calls if s.text == "tgt()")][0]
+    assert tgt_call in succ(c, val_ret)
+
+    # Dict evaluates k1, v1, k2, v2 in order.
+    k1_ret = c.calls[next(s for s in c.calls if s.text == "k1()")][1]
+    v1_call, v1_ret = c.calls[next(s for s in c.calls if s.text == "v1()")]
+    k2_call = c.calls[next(s for s in c.calls if s.text == "k2()")][0]
+    assert v1_call in succ(c, k1_ret) and k2_call in succ(c, v1_ret)
+
+    # Multi-generator comprehension places inner_it inside the loop and lambda default in f.
+    assert any(s.text == "inner_it(x)" for s in c.calls)
+    assert any(s.text == "dflt()" for s in c.calls)
+    assert not any(s.text == "inner_only()" for s in c.calls)
+    assert any(n.text.endswith("...") and len(n.text) == 50 for n in c.nodes)
+
+
+def test_icfg_pred_implicit_and_missing_syntactic_site_error() -> None:
+    from callme.model import Edge, Site
+    from callme.output import build_icfg
+
+    cg = analyze_source(textwrap.dedent("""
+        class Num:
+            def __add__(self, other): return self
+        def callee(): pass
+        def caller():
+            callee()
+            return Num() + Num()
+        caller()
+    """), "t.py", id_style="short")
+    g = cg.icfg()
+    callee_node = next(n for n in cg.nodes if n.func.qualname == "callee")
+    caller_node = next(n for n in cg.nodes if n.func.qualname == "caller")
+    assert any(e.kind == CALL_EDGE and e.src == caller_node for e in g.pred(g.entry(callee_node)))
+    call_pt, ret_pt = g.cfg(caller_node).calls[
+        next(s for s in g.cfg(caller_node).calls if s.text == "callee()")
+    ]
+    assert any(e.kind == RETURN_EDGE and e.src == callee_node for e in g.pred((caller_node, ret_pt)))
+    assert any(e.kind == CALL_TO_RETURN and e.src_pt == call_pt for e in g.pred((caller_node, ret_pt)))
+
+    # Implicit dunder edge lives in g.implicit and is omitted from call_edges.
+    assert any(e.site.kind == "op" and e.callee.func.qualname == "Num.__add__" for e in g.implicit)
+    assert all(e.site is None or e.site.kind in ("call", "decorator") for e in g.call_edges())
+
+    # Syntactic site missing from the CFG must raise ValueError.
+    bogus_site = Site(caller_node.func, 999, 0, "ghost()", "call")
+    with pytest.raises(ValueError, match="missing from the CFG"):
+        build_icfg(cg.prog, cg.nodes, [Edge(caller_node, bogus_site, callee_node)])

@@ -431,3 +431,400 @@ def test_asyncio_stubs_and_persistence_roundtrip() -> None:
         ("on_done", "exec_ret"),
         ("main", "queued"),
     } <= got
+
+
+def test_builtins_remaining_stubs_and_fallbacks() -> None:
+    src = """
+        def leaf(): return 1
+        def pair(a, b): return (a(), b())
+        def dflt(): return 2
+        def f1(): return 3
+        def f2(): return 4
+
+        class Ord:
+            def __lt__(self, o): return True
+            def __repr__(self): return "O"
+            def __hash__(self): return 1
+
+        class LenOnly:
+            def __len__(self): return 1
+
+        class IdxOnly:
+            def __index__(self): return 1
+
+        class StrOnly:
+            def __str__(self): return "S"
+
+        class RevIter:
+            def __next__(self): return f1
+
+        class HasRevIter:
+            def __reversed__(self): return RevIter()
+
+        class HasRevPlain:
+            def __reversed__(self): return f2
+
+        class IterOnly:
+            def __iter__(self): return RevIter()
+
+        pairs = [(f1, f2)]
+        list(map(pair, *pairs))
+        o = Ord()
+        min(o, o)
+        max([], default=dflt)()
+        [o].sort()
+        repr(o)
+        hash(o)
+        all([o])
+        any([LenOnly()])
+        sum(IterOnly())
+        int(IdxOnly())
+        format(StrOnly(), "")
+        format(Ord(), "")
+        for fn1 in reversed(HasRevIter()):
+            fn1()
+        for fn2 in reversed(HasRevPlain()):
+            fn2()
+        for fn3 in reversed(IterOnly()):
+            fn3()
+        next(iter([]), dflt)()
+        async def run_anext():
+            await anext(aiter([]), dflt)()
+        run_anext()
+        object()
+        type(1)
+    """
+    got = edges(src)
+    assert {
+        ("<module>", "pair"),
+        ("pair", "f1"),
+        ("pair", "f2"),
+        ("<module>", "Ord.__lt__"),
+        ("<module>", "Ord.__repr__"),
+        ("<module>", "Ord.__hash__"),
+        ("<module>", "dflt"),
+        ("<module>", "LenOnly.__len__"),
+        ("<module>", "IterOnly.__iter__"),
+        ("<module>", "RevIter.__next__"),
+        ("<module>", "IdxOnly.__index__"),
+        ("<module>", "StrOnly.__str__"),
+        ("<module>", "HasRevIter.__reversed__"),
+        ("<module>", "HasRevPlain.__reversed__"),
+        ("<module>", "f1"),
+        ("<module>", "f2"),
+        ("run_anext", "dflt"),
+    } <= got
+
+
+def test_functools_partial_widening_fold_and_remaining_stubs() -> None:
+    src = """
+        import functools
+
+        def a(): return 1
+        def b(): return 2
+        def c(): return 3
+        def d(): return 4
+        def kw_impl(x): return x
+        def step1(): return step2
+        def step2(): return 9
+
+        def call_many(*args, **kwargs):
+            for x in args:
+                x()
+            for y in kwargs.values():
+                y()
+
+        # Flattened partial with keyword merging.
+        p1 = functools.partial(call_many, a, k=b)
+        p2 = functools.partial(p1, c, k=d)
+        p2()
+
+        # Widened partial (> MAX_PARTIAL_ARGS) and starred construction.
+        pw = functools.partial(call_many, a, b, c, d, a)
+        pw()
+        pstar = functools.partial(call_many, *(a, b))
+        pstar()
+
+        # Recursive partial nesting past MAX_PARTIAL_DEPTH terminates soundly.
+        def nest(n, f):
+            if n:
+                return nest(n - 1, functools.partial(f, a))
+            return f
+        nest(5, call_many)()
+
+        # Widened partialmethod (> MAX_PARTIAL_ARGS).
+        class K:
+            def run(self, *args):
+                for x in args:
+                    x()
+            wide = functools.partialmethod(run, a, b, c, d, a)
+        K().wide()
+
+        # Bare cache / lru_cache, update_wrapper, total_ordering, singledispatch.dispatch & kw func.
+        @functools.cache
+        def cached_bare(): return 1
+        @functools.lru_cache
+        def lru_bare(): return 2
+        cached_bare()
+        lru_bare()
+
+        def orig(): return 1
+        def wrap(): return orig()
+        functools.update_wrapper(wrap, orig)()
+
+        @functools.total_ordering
+        class Ord:
+            def __eq__(self, o): return True
+            def __lt__(self, o): return True
+        Ord() < Ord()
+
+        @functools.singledispatch
+        def sd(x): return a()
+        sd.register(str, func=kw_impl)
+        sd.dispatch(str)(1)
+
+        # Multi-iteration fold: step 1 returns step2, step 2 calls acc() -> step2.
+        def folder(acc, _item):
+            return acc()
+        functools.reduce(folder, [1, 2], step1)
+    """
+    got = edges(src)
+    assert {
+        ("<module>", "call_many"),
+        ("call_many", "a"),
+        ("call_many", "b"),
+        ("call_many", "c"),
+        ("call_many", "d"),
+        ("<module>", "K.run"),
+        ("K.run", "a"),
+        ("<module>", "cached_bare"),
+        ("<module>", "lru_bare"),
+        ("<module>", "wrap"),
+        ("wrap", "orig"),
+        ("<module>", "Ord.__lt__"),
+        ("<module>", "sd"),
+        ("<module>", "kw_impl"),
+        ("<module>", "folder"),
+        ("folder", "step1"),
+        ("folder", "step2"),
+    } <= got
+
+
+def test_itertools_full_coverage() -> None:
+    src = """
+        import itertools
+
+        def acc_fn(x, y): return x()
+        def star_fn(x, y): return (x(), y())
+        def key_fn(x): return x()
+        def pred(x): return True
+        def f1(): return 1
+        def f2(): return 2
+        def f3(): return 3
+        def f4(): return 4
+        def f5(): return 5
+        def f6(): return 6
+
+        class SelIter:
+            def __iter__(self): return self
+            def __next__(self): return f4
+
+        for _ in itertools.accumulate([f1], func=acc_fn, initial=f2):
+            pass
+        for _ in itertools.starmap(star_fn, [(f1, f2)]):
+            pass
+        for _ in itertools.groupby([f3], key=key_fn):
+            pass
+        for fn in itertools.filterfalse(pred, [f1]):
+            fn()
+        for fn in itertools.takewhile(pred, [f2]):
+            fn()
+        for fn in itertools.dropwhile(pred, [f3]):
+            fn()
+        for fn in itertools.compress([f5], SelIter()):
+            fn()
+        for fn in itertools.product([f5], [f6]):
+            fn()
+        for fn in itertools.permutations([f6]):
+            fn()
+        for fn in itertools.combinations([f6], 1):
+            fn()
+        for fn in itertools.combinations_with_replacement([f6], 1):
+            fn()
+        for fn in itertools.pairwise([f6]):
+            fn()
+        for fn in itertools.batched([f6], 1):
+            fn()
+        for fn in itertools.tee([f6]):
+            fn()
+        itertools.count(1)
+    """
+    got = edges(src)
+    assert {
+        ("<module>", "acc_fn"),
+        ("acc_fn", "f1"),
+        ("acc_fn", "f2"),
+        ("<module>", "star_fn"),
+        ("star_fn", "f1"),
+        ("star_fn", "f2"),
+        ("<module>", "key_fn"),
+        ("key_fn", "f3"),
+        ("<module>", "pred"),
+        ("<module>", "SelIter.__iter__"),
+        ("<module>", "SelIter.__next__"),
+        ("<module>", "f5"),
+        ("<module>", "f6"),
+    } <= got
+
+
+def test_contextlib_collections_threading_futures_asyncio_remaining() -> None:
+    src = """
+        import asyncio
+        import collections
+        import concurrent.futures
+        import contextlib
+        import threading
+
+        def cb1(): return 1
+        def cb2(): return 2
+        def cb3(): return 3
+        def cb4(): return 4
+        def on_sync_push(t, v, tb): return 1
+        def on_async_push(t, v, tb): return 1
+        def init_fn(arg): return arg()
+        def init_arg(): return 1
+        def map_fn(x): return x()
+        def done_cb(fut): return fut.result()()
+        def res_fn(): return 2
+        def on_ts(): return 3
+        def on_at(): return 4
+        def sleep_cb(): return 5
+        def await_cb(): return 6
+
+        class Res:
+            def __enter__(self): return self
+            def __exit__(self, *a): return None
+            def close(self): return None
+
+        class ARes:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+
+        class CustomAwait:
+            def __await__(self): return await_cb
+
+        # contextlib: ExitStack.push(CM & builtin CM), pop_all, close, AsyncExitStack sync/async.
+        es = contextlib.ExitStack()
+        es.callback(None)
+        es.push(None)
+        es.push(Res())
+        es.push(contextlib.closing(Res()))
+        es2 = es.pop_all()
+        es2.close()
+
+        aes = contextlib.AsyncExitStack()
+        aes.callback(cb1)
+        aes.enter_context(Res())
+        aes.push(on_sync_push)
+        aes.close()
+        aes2 = aes.pop_all()
+        aes2.push_async_exit(ARes())
+        aes2.push_async_exit(on_async_push)
+        async def close_aes():
+            await aes2.aclose()
+        close_aes()
+        with contextlib.suppress(ValueError), contextlib.redirect_stdout(None), \
+                contextlib.redirect_stderr(None), contextlib.chdir("."):
+            pass
+
+        # collections: defaultdict without factory, default_factory(), OrderedDict/Counter/UserDict/UserList, _make.
+        dd_plain = collections.defaultdict()
+        dd_plain["k"] = cb1
+        dd_plain["k"]()
+        dd_fac = collections.defaultdict(lambda: cb2)
+        dd_fac.default_factory()()
+        od = collections.OrderedDict([("a", cb3)])
+        od["a"]()
+        ul = collections.UserList([cb4])
+        ul[0]()
+        dq = collections.deque()
+        dq.extendleft([cb3])
+        dq.popleft()()
+        Pair = collections.namedtuple("Pair", ["x"])
+        Pair._make([cb4])[0]()
+
+        # threading: run(), Timer with args + cancel(), sync primitives.
+        threading.Thread(target=cb1).run()
+        tm = threading.Timer(1.0, init_fn, args=(init_arg,))
+        tm.start()
+        tm.cancel()
+        threading.Lock()
+        threading.Event()
+        threading.local()
+
+        # concurrent.futures: ProcessPoolExecutor + initargs, starred map, set_result before callback, as_completed/wait.
+        ex = concurrent.futures.ProcessPoolExecutor(initializer=init_fn, initargs=(init_arg,))
+        list(ex.map(map_fn, *([cb2],)))
+        ex.shutdown()
+        fut = concurrent.futures.Future()
+        fut.set_result(res_fn)
+        fut.add_done_callback(done_cb)
+        fut.done()
+        fut.running()
+        fut.cancelled()
+        fut.cancel()
+        fut.exception()
+        for f in concurrent.futures.as_completed([fut]):
+            f.result()()
+        concurrent.futures.wait([fut])
+
+        # asyncio: loop create_future / run_until_complete / call_soon_threadsafe / call_at / lifecycle,
+        # wait_for / shield / sleep(result=) / LifoQueue / sync primitives.
+        loop = asyncio.new_event_loop()
+        loop.call_soon_threadsafe(on_ts)
+        loop.call_at(1.0, on_at)
+        lf = loop.create_future()
+        lf.set_result(res_fn)
+        loop.run_until_complete(lf)()
+        loop.run_until_complete(CustomAwait())()
+        loop.stop()
+        loop.run_forever()
+        loop.close()
+
+        async def async_rest():
+            s = await asyncio.sleep(0, result=sleep_cb)
+            s()
+            await asyncio.wait_for(asyncio.shield(CustomAwait()), 1.0)
+            q = asyncio.LifoQueue()
+            q.put_nowait(cb4)
+            q.get_nowait()()
+            asyncio.Lock()
+        asyncio.run(async_rest())
+    """
+    got = edges(src)
+    assert {
+        ("<module>", "Res.__enter__"),
+        ("<module>", "Res.__exit__"),
+        ("<module>", "Res.close"),
+        ("<module>", "cb1"),
+        ("<module>", "cb2"),
+        ("<module>", "cb3"),
+        ("<module>", "cb4"),
+        ("<module>", "on_sync_push"),
+        ("close_aes", "ARes.__aexit__"),
+        ("close_aes", "on_async_push"),
+        ("<module>", "init_fn"),
+        ("init_fn", "init_arg"),
+        ("<module>", "map_fn"),
+        ("map_fn", "cb2"),
+        ("<module>", "done_cb"),
+        ("done_cb", "res_fn"),
+        ("<module>", "res_fn"),
+        ("<module>", "on_ts"),
+        ("<module>", "on_at"),
+        ("<module>", "CustomAwait.__await__"),
+        ("<module>", "await_cb"),
+        ("async_rest", "sleep_cb"),
+        ("async_rest", "CustomAwait.__await__"),
+        ("async_rest", "cb4"),
+    } <= got

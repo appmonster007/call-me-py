@@ -466,3 +466,239 @@ def test_unknown_decorator_is_context_sensitive_and_persists() -> None:
     chained = solve(prog, s_solve, include_unreachable=True)
     direct = solve(prog, include_unreachable=True)
     assert chained.same_result(direct)
+
+
+def test_model_ids_module_name_and_token_labels() -> None:
+    import pytest
+    from callme.model import (Alloc, BoundMethod, Box, Builtin, ClassId, ClassMethod, ClassObj,
+                              Closure, FuncId, Instance, Module, Property, StaticMethod, Super,
+                              module_name, token_label)
+
+    assert module_name("__init__.py") == "__init__.py"
+    assert module_name("./pkg/util.py") == "pkg.util"
+    assert module_name("../a/b/__init__.py") == "a.b"
+    assert module_name("<string>") == "<string>"
+
+    top = FuncId("f", "m.py", 1, 0)
+    assert (top.name, top.scope) == ("f", "")
+    with pytest.raises(ValueError, match="unknown id style"):
+        top.render("bogus")
+
+    cid = ClassId("C", "m.py", 2, 0)
+    alloc = Alloc(top, 5, 4)
+    clo = Closure(top)
+    inst = Instance(cid, alloc)
+    assert token_label(clo, "short") == "f"
+    assert token_label(Builtin("map"), "short") == "map"
+    assert token_label(Builtin("<partial>", (frozenset([clo]),)), "short") == "<partial:f>"
+    assert token_label(Builtin("<partial*>", (frozenset([clo]),)), "short") == "<partial*:f>"
+    assert token_label(ClassObj(cid), "short") == "<class C>"
+    assert token_label(inst, "short") == "C()@5:4"
+    assert token_label(Instance(cid, None), "short") == "C()"
+    assert token_label(Box("list", alloc), "short") == "<list@5:4>"
+    assert token_label(Module("pkg.util"), "short") == "<module pkg.util>"
+    assert token_label(BoundMethod(clo, inst), "short") == "f@C()@5:4"
+    assert token_label(ClassMethod(clo), "short") == "classmethod(f)"
+    assert token_label(StaticMethod(clo), "short") == "staticmethod(f)"
+    assert token_label(Super(cid, inst), "short") == "super(C, C()@5:4)"
+    assert token_label(Property(frozenset([clo])), "short") == "property(f)"
+
+
+def test_context_label_disambiguation_and_site_truncation() -> None:
+    cg = graph("""
+        def inc(): pass
+        def dec(): pass
+        def make(f):
+            def h(): return f()
+            return h
+        make(inc)()
+        make(dec)()
+        def long_call(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd, eeeeeeeeee):
+            return 1
+        long_call(1111111111, 2222222222, 3333333333, 4444444444, 5555555555)
+    """)
+    h_labels = sorted(n for n in labels(cg) if n.startswith("make.h"))
+    assert h_labels == ["make.h#1", "make.h#2"]
+    long_sites = [s for s in cg.sites if s.text.startswith("long_call(")]
+    assert len(long_sites) == 1
+    assert len(long_sites[0].text) == 60 and long_sites[0].text.endswith("...")
+
+
+def test_max_contexts_zero_widens_immediately_and_exports_star() -> None:
+    cg = graph(APPLY, max_contexts=0)
+    assert "apply[*]" in labels(cg)
+    assert {("apply", "square"), ("apply", "double")} <= cg.function_edges()
+    doc = to_dict(cg)
+    ctxs = cast("list[dict[str, object]]", doc["contexts"])
+    widened = next(c for c in ctxs if c["id"] == "apply[*]")
+    assert widened["context"] == {"*": []}
+    assert '"apply[*]" -> "square[*]"' in to_dot(cg, contexts=True)
+
+
+def test_closure_depth_widening_terminates_and_default_without_parent() -> None:
+    from callme.analysis import mk_closure
+    from callme.model import FuncId
+
+    assert mk_closure(FuncId("f", "t.py", 1, 0), None).parent is None
+
+    # Recursive closure creation exceeds MAX_DEPTH and widens parent to None while staying sound.
+    cg = graph("""
+        def target(): return 1
+        def nest(n, f):
+            def wrap(cb=f):
+                return cb()
+            if n > 0:
+                return nest(n - 1, wrap)
+            return wrap
+        nest(5, target)()
+    """)
+    assert ("nest.wrap", "target") in cg.function_edges()
+    assert any(n.func.qualname == "nest.wrap" and n.ctx.parent is None for n in cg.nodes)
+
+
+def test_bind_args_signature_and_default_edge_cases() -> None:
+    cg = graph("""
+        def leaf1(): pass
+        def leaf2(): pass
+        def leaf3(): pass
+        def leaf4(): pass
+
+        def one(a): return a()
+        def kw_only(*, cb): return cb()
+        def kw_default(*, cb=leaf1): return cb()
+        def needs_two(a, b):
+            a()
+            b()
+        def multi_var(*args, **kwargs):
+            for f in args:
+                f()
+            for g in kwargs.values():
+                g()
+
+        def try_bad(f):
+            f(leaf1, leaf2)          # too many positional for `one`
+            f(leaf1, a=leaf2)        # duplicate positional + keyword for `one`
+            f(leaf1, bogus=leaf2)    # unknown keyword for `one`
+
+        try_bad(one)
+        kw_only(leaf1)               # rejected: positional given to kw-only
+        kw_only()                    # rejected: missing required kw-only
+        kw_only(cb=leaf2)            # accepted
+        kw_default()                 # non-constant kw-only default
+        needs_two(*(leaf3, leaf4))   # *args satisfies required params
+        needs_two(**{"a": leaf3, "b": leaf4})  # **kwargs satisfies required params
+        multi_var(*(leaf1,), *(leaf2,), **{"x": leaf3}, **{"y": leaf4})
+        lam = lambda x, f=leaf1, *, g=leaf2: (f(), g())
+        lam(0)
+    """)
+    edges = cg.function_edges()
+    assert ("try_bad", "one") not in edges
+    assert ("kw_only", "leaf1") not in edges
+    assert ("kw_only", "leaf2") in edges
+    assert ("kw_default", "leaf1") in edges
+    assert {("needs_two", "leaf3"), ("needs_two", "leaf4")} <= edges
+    assert {("multi_var", "leaf1"), ("multi_var", "leaf2"),
+            ("multi_var", "leaf3"), ("multi_var", "leaf4")} <= edges
+    assert any(c.startswith("<lambda>@") and d == "leaf1" for c, d in edges)
+    assert any(c.startswith("<lambda>@") and d == "leaf2" for c, d in edges)
+
+
+def test_decorator_edge_cases() -> None:
+    cg = graph("""
+        from thirdparty import ext_deco
+
+        def swallow(fn):
+            return None
+
+        def deep_factory():
+            return make_deco()
+
+        def make_deco():
+            def deco(fn):
+                def wrapper():
+                    return fn()
+                return wrapper
+            return deco
+
+        def replace_cls(cls):
+            class Proxy:
+                def run(self):
+                    return cls.orig()
+            return Proxy
+
+        @swallow
+        def swallowed():
+            return 1
+
+        @deep_factory()
+        def delayed():
+            return 2
+
+        @ext_deco
+        async def async_fn():
+            return 3
+
+        class Box:
+            @ext_deco
+            def method(self):
+                return 4
+
+        @replace_cls
+        class Real:
+            @staticmethod
+            def orig():
+                return 5
+
+        swallowed()
+        delayed()
+        async_fn()
+        Box().method()
+        Real().run()
+    """)
+    edges = cg.function_edges()
+    assert ("<module>", "swallowed") not in edges
+    assert ("<module>", "delayed") not in edges
+    assert {("<module>", "swallow"), ("make_deco.deco.wrapper", "delayed"),
+            ("<module>", "async_fn"), ("<module>", "Box.method"),
+            ("<module>", "replace_cls"), ("<module>", "replace_cls.Proxy.run"),
+            ("replace_cls.Proxy.run", "Real.orig")} <= edges
+
+
+def test_cli_formats_print_graph_and_dot_escaping(tmp_path, capsys) -> None:
+    from callme.__main__ import main as cli
+
+    prog_file = tmp_path / "prog.py"
+    prog_file.write_text(textwrap.dedent("""\
+        def leaf(s):
+            return s
+        def run():
+            return leaf('a"b\\\\c')
+        run()
+    """), encoding="utf-8")
+
+    # No -o: runs cleanly and writes nothing.
+    assert cli([str(prog_file)]) == 0
+    assert capsys.readouterr().out == ""
+
+    # --print-graph writes lexical nesting and call sites to stderr.
+    assert cli([str(prog_file), "--short-ids", "--print-graph"]) == 0
+    err = capsys.readouterr().err
+    assert "# function identifier graph" in err and "<module> -> run" in err
+    assert "# call sites" in err and "run -> leaf(" in err
+
+    # --format dot (--contexts, --returns), --format icfg, --format json --icfg, --flow-insensitive.
+    dot_out = tmp_path / "g.dot"
+    icfg_out = tmp_path / "icfg.dot"
+    json_out = tmp_path / "g.json"
+    assert cli([str(prog_file), "--short-ids", "--format", "dot", "--contexts", "--returns",
+                "--max-contexts", "2", "--flow-insensitive", "-o", str(dot_out)]) == 0
+    dot_text = dot_out.read_text(encoding="utf-8")
+    assert dot_text.startswith("digraph callgraph") and "style=dotted" in dot_text
+
+    assert cli([str(prog_file), "--short-ids", "--format", "icfg", "-o", str(icfg_out)]) == 0
+    icfg_text = icfg_out.read_text(encoding="utf-8")
+    assert icfg_text.startswith("digraph icfg") and '\\"' in icfg_text and "\\\\" in icfg_text
+
+    assert cli([str(prog_file), "--short-ids", "--icfg", "-o", str(json_out)]) == 0
+    doc = json.loads(json_out.read_text(encoding="utf-8"))
+    assert "icfg" in doc and set(doc["icfg"]["cfgs"]) == {"<module>", "run", "leaf"}

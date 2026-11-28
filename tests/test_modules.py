@@ -226,3 +226,179 @@ def test_saved_state_with_modules_resumes_until_a_module_changes(tmp_path: Path)
     (tmp_path / "lib.py").write_text("def f(): return 1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="different program"):
         load_state(parse_file(tmp_path / "main.py"), saved)
+
+
+def test_loader_entry_and_precedence_edge_cases(tmp_path: Path) -> None:
+    from callme.frontend import parse_files
+
+    # Empty entry list rejected.
+    with pytest.raises(ValueError, match="at least one entry"):
+        parse_files([])
+
+    # Entry file is __init__.py -> module is the package itself.
+    p1 = make(tmp_path / "pkg_entry", {
+        "pkg/__init__.py": "from .core import run\nrun()\n",
+        "pkg/core.py": "def run(): pass\n",
+    })
+    prog = parse_file(p1 / "pkg" / "__init__.py")
+    assert prog.module.module == "pkg" and prog.modules["pkg"].package
+    assert edges(p1 / "pkg" / "__init__.py") == {("pkg.<module>", "pkg.core.run")}
+
+    # Passing the same entry file twice is deduplicated rather than rejected.
+    init_path = p1 / "pkg" / "__init__.py"
+    prog_dup = parse_files([init_path, init_path])
+    assert len(prog_dup.entries) == 2 and prog_dup.entries[0] == prog_dup.entries[1]
+
+    # Package directory wins over sibling .py module; regular module in later search_path
+    # wins over namespace directory in earlier root; namespace package spans multiple roots.
+    p2 = make(tmp_path / "prec", {
+        "r1/both/__init__.py": "def which(): pass\n",
+        "r1/both.py": "def which(): pass\n",
+        "r1/reg/dummy.txt": "",
+        "r2/reg.py": "def from_file(): pass\n",
+        "r1/ns/a.py": "def fa(): pass\n",
+        "r2/ns/b.py": "def fb(): pass\n",
+        "r1/main.py": """\
+            import both
+            import reg
+            import ns.a
+            import ns.b
+            both.which()
+            reg.from_file()
+            ns.a.fa()
+            ns.b.fb()
+            """,
+    })
+    got = edges(p2 / "r1" / "main.py", search_path=[p2 / "r2"])
+    assert got == {
+        ("main.<module>", "both.which"),
+        ("main.<module>", "reg.from_file"),
+        ("main.<module>", "ns.a.fa"),
+        ("main.<module>", "ns.b.fb"),
+    }
+    prog2 = parse_file(p2 / "r1" / "main.py", search_path=[p2 / "r2"])
+    assert prog2.modules["both"].package
+    assert prog2.modules["reg"].file is not None and not prog2.modules["reg"].package
+    assert prog2.modules["ns"].file is None
+
+    # Same file reachable under two module names shares one ModuleInfo.
+    p3 = make(tmp_path / "alias_file", {
+        "pkg/__init__.py": "",
+        "pkg/sub.py": "def f(): pass\n",
+        "main.py": "import pkg.sub\nimport sub\npkg.sub.f()\nsub.f()\n",
+    })
+    prog3 = parse_file(p3 / "main.py", search_path=[p3 / "pkg"])
+    assert prog3.modules["pkg.sub"] is prog3.modules["sub"]
+
+
+def test_module_all_and_star_import_edge_cases(tmp_path: Path) -> None:
+    assert module_all(ast.parse("__all__ = ('a', 'b')\n").body) == frozenset({"a", "b"})
+    assert module_all(ast.parse("__all__: list[str] = ['a']\n__all__.extend(['b'])\n").body) == frozenset({"a", "b"})
+    assert module_all(ast.parse("__all__ = []\n").body) == frozenset()
+    assert module_all(ast.parse("__all__: list[str]\n").body) is None
+    assert module_all(ast.parse("__all__ = ['a'] + other\n").body) is None
+
+    # Star import of package with submodule in __all__, cyclic star imports, and empty __all__.
+    make(tmp_path, {
+        "pkg/__init__.py": "__all__ = ['sub']\n",
+        "pkg/sub.py": "def work(): pass\n",
+        "cyc_a.py": "from cyc_b import *\ndef fa(): pass\n",
+        "cyc_b.py": "from cyc_a import *\ndef fb(): pass\n",
+        "empty_mod.py": "__all__ = []\ndef hidden(): pass\n",
+        "main.py": """\
+            from pkg import *
+            from cyc_a import *
+            from empty_mod import *
+            sub.work()
+            fa()
+            fb()
+            hidden()
+            """,
+    })
+    got = edges(tmp_path / "main.py")
+    assert got == {
+        ("main.<module>", "pkg.sub.work"),
+        ("main.<module>", "cyc_a.fa"),
+        ("main.<module>", "cyc_b.fb"),
+    }
+
+
+def test_imports_relative_invalid_dynamic_stubs_and_module_writes(tmp_path: Path) -> None:
+    make(tmp_path, {
+        "pkg/__init__.py": "",
+        "pkg/util.py": "def helper(): pass\n",
+        "pkg/sub/__init__.py": "",
+        "pkg/sub/mod.py": """\
+            from ..util import helper
+            def run():
+                return helper()
+            """,
+        "ns/leaf.py": "def f(): pass\n",
+        "target.py": """\
+            def orig(): pass
+            hook = orig
+            """,
+        "patcher.py": """\
+            import target
+            def patched(): pass
+            target.hook = patched
+            """,
+        "main.py": """\
+            import functools as ft
+            from builtins import *
+            import importlib
+            import pkg.sub.mod
+            import pkg.sub.mod as alias_mod
+            from pkg.sub import mod
+            import ns.leaf
+            import target
+            import patcher
+            from .. import impossible  # invalid relative import at top level
+
+            def leaf(): pass
+            def id_fn(x): return x
+            def with_dyn_default(m=__import__("pkg.util")):
+                return m.helper()
+
+            pkg.sub.mod.run()
+            alias_mod.run()
+            mod.run()
+            ns.x = leaf  # attribute write on namespace package is harmless
+            target.hook()
+            ft.partial(id_fn, 1)()
+            list(map(id_fn, [1]))
+            __import__("not-an-identifier")
+            importlib.import_module(".relative_ignored")
+            with_dyn_default()
+            """,
+    })
+    got = edges(tmp_path / "main.py")
+    assert {
+        ("main.<module>", "pkg.sub.mod.run"),
+        ("pkg.sub.mod.run", "pkg.util.helper"),
+        ("main.<module>", "target.orig"),
+        ("main.<module>", "patcher.patched"),
+        ("main.<module>", "main.id_fn"),
+        ("main.<module>", "main.with_dyn_default"),
+        ("main.with_dyn_default", "pkg.util.helper"),
+    } <= got
+
+    # SyntaxError in an imported module propagates.
+    bad = make(tmp_path / "bad_syntax", {
+        "broken.py": "def oops(:\n",
+        "main.py": "import broken\n",
+    })
+    with pytest.raises(SyntaxError):
+        parse_file(bad / "main.py")
+
+
+@pytest.mark.xfail(strict=True, reason="star-imported stub names are not in module locals, so NameLayer.bind drops them")
+def test_star_import_from_stub_module_binds_stubs(tmp_path: Path) -> None:
+    make(tmp_path, {
+        "main.py": """\
+            from functools import *
+            def id_fn(x): return x
+            partial(id_fn, 1)()
+            """,
+    })
+    assert ("main.<module>", "main.id_fn") in edges(tmp_path / "main.py")

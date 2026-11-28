@@ -285,3 +285,145 @@ def test_cli_save_then_resume_equals_single_run(tmp_path: Path) -> None:
     cli([case, "--include-unreachable", "-o", str(tmp_path / "direct.json")])
     chained, direct = (json.loads((tmp_path / f).read_text()) for f in ("chained.json", "direct.json"))
     assert chained["edges"] == direct["edges"] and chained["sites"] == direct["sites"]
+
+
+def test_persistence_roundtrip_all_value_rows() -> None:
+    import textwrap
+
+    src = textwrap.dedent("""\
+        import functools
+        from thirdparty import ext_deco
+
+        def a(x, k=0): return x
+        def b(): return 1
+
+        class Meta(type):
+            def __call__(cls, *args):
+                return super().__call__(*args)
+
+        class Base(metaclass=Meta):
+            def m(self): return a(1)
+            @classmethod
+            def cm(cls): return b()
+            @staticmethod
+            def sm(): return b()
+            @property
+            def prop(self): return a(1)
+            @prop.setter
+            def prop(self, v): b()
+            @prop.deleter
+            def prop(self): b()
+
+        class Sub(Base):
+            def m(self):
+                s = super()
+                return s.m()
+
+        @ext_deco
+        def decorated():
+            return 1
+
+        def use(x):
+            return x
+
+        def setter():
+            global g
+            g = b
+
+        g = a
+        setter()
+        p = functools.partial(a, k=b)
+        xs = [Sub()]
+        xs.append(p)
+        use(Sub().m)
+        use(Sub.cm)
+        use(Sub.sm)
+        use(Base.prop)
+        use(p)
+        Sub().m()
+        decorated()
+    """)
+    prog = build_program(src, "all_rows.py")
+    for s in (solve(prog), solve(prog, max_contexts=1)):
+        doc = json.loads(json.dumps(state_to_dict(s)))
+        tags = {row[0] for row in doc["values"]}
+        assert {"node", "clo", "builtin", "class", "inst", "box", "bound",
+                "classmethod", "staticmethod", "super", "property"} <= tags
+        assert doc["unknown_decos"] and doc["writes"] and doc["extern"]
+        assert doc["bases"] and doc["metaclasses"]
+        back = state_from_dict(prog, doc)
+        assert back.same_result(s)
+        assert solve(prog, back).same_result(s)
+
+
+def test_persistence_and_facts_validation_errors() -> None:
+    prog = build_program("class C:\n    pass\ndef f(): pass\nf()\n", "t.py")
+    base_doc = state_to_dict(solve(prog))
+
+    # Header / non-dict / version errors.
+    with pytest.raises(ValueError, match="not a callme-state"):
+        state_from_dict(prog, [])
+    bad_fmt = {**base_doc, "format": "wrong"}
+    with pytest.raises(ValueError, match="not a callme-state"):
+        state_from_dict(prog, bad_fmt)
+    bad_ver = {**base_doc, "version": 4}
+    with pytest.raises(ValueError, match="not a callme-state"):
+        state_from_dict(prog, bad_ver)
+
+    # Unknown function, class, module, malformed row, box without alloc, type mismatches.
+    for values, match in [
+        ([["clo", "no_such_func", None, 0]], "unknown function"),
+        ([["class", "no_such_class"]], "unknown class"),
+        ([["module", "no_such_module"]], "unknown module"),
+        ([["class"]], "malformed value row"),
+        ([["bogus", "x"]], "malformed value row"),
+        ([["box", "list", None]], "without an allocation site"),
+        ([["node", prog.module.uid, [], None, False], ["classmethod", 0]], "expected a token"),
+        ([["class", next(iter(prog.classes)).uid],
+          ["bound", 0, 0],
+          ["node", prog.module.uid, [], 0, False]], "expected a Node"),
+        ([["clo", prog.module.uid, None, 0], ["bound", 0, 0]], "expected a receiver"),
+    ]:
+        doc = {**base_doc, "values": values, "order": [], "envs": [], "ret": [],
+               "entry": [], "edges": [], "inst_attrs": [], "heap": [], "writes": [],
+               "unknown_decos": []}
+        with pytest.raises(ValueError, match=match):
+            state_from_dict(prog, doc)
+
+    # Facts validation & codec type error.
+    facts = run_passes(prog, [CallGraphPass()])
+    fdoc = facts_to_dict(facts)
+    with pytest.raises(ValueError, match="not a callme-facts"):
+        facts_from_dict(prog, "bad")
+    with pytest.raises(ValueError, match="not a callme-facts"):
+        facts_from_dict(prog, {**fdoc, "format": "other"})
+    with pytest.raises(ValueError, match="not a callme-facts"):
+        facts_from_dict(prog, {**fdoc, "program": "wrong"})
+    bad_facts = Facts(prog.fingerprint, {"callgraph": ReachPass.S()})
+    with pytest.raises(TypeError, match="must be a State"):
+        facts_to_dict(bad_facts)
+
+
+def test_pipeline_and_solver_callbacks_inplace_and_errors() -> None:
+    prog = build_program("def a(): return b\ndef b(): return 1\na()()\n", "t.py")
+
+    rounds: list[int] = []
+    s = solve(prog, on_round=lambda r, _st: rounds.append(r))
+    assert rounds == list(range(len(rounds))) and len(rounds) >= 2
+
+    with pytest.raises(RuntimeError, match="did not converge"):
+        solve(prog, max_rounds=1)
+
+    facts = Facts(prog.fingerprint)
+    pass_rounds: list[int] = []
+    out = run_passes(prog, [CallGraphPass(), ReachPass()], facts, inplace=True,
+                     on_round=lambda r, _f: pass_rounds.append(r))
+    assert out is facts
+    assert "callgraph" in facts and "reach" in facts and "missing" not in facts
+    assert pass_rounds == list(range(len(pass_rounds))) and len(pass_rounds) >= 2
+    assert facts.get("callgraph", State).same_result(s)
+
+    with pytest.raises(TypeError, match="state of pass"):
+        facts.get("reach", State)
+    with pytest.raises(TypeError, match="must be a State"):
+        CallGraphPass().init(prog, facts, ReachPass.S())

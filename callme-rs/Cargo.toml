@@ -1,0 +1,49 @@
+[package]
+name = "callme"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "Context-sensitive call graphs for Python programs by abstract interpretation (Rust port of call-me-py)"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "callme"
+path = "src/main.rs"
+
+[[bin]]
+name = "callme-dump"
+path = "src/bin/callme-dump.rs"
+
+[dependencies]
+# The parser is Ruff's. Its API is internal and changes between releases, so it is pinned exactly,
+# and only `syntax::lower` uses it.
+ruff_python_parser = "=0.0.23"
+ruff_python_ast = "=0.0.23"
+ruff_text_size = "=0.0.23"
+rustc-hash = "2.1"
+indexmap = "2.14"
+sha2 = "0.11"
+
+[dev-dependencies]
+libtest-mimic = "0.8"
+
+[[test]]
+name = "cases"
+path = "tests/cases.rs"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+missing_docs_in_private_items = "warn"
